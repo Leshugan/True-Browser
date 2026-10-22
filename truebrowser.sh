@@ -431,6 +431,10 @@ GRAVITY_BOTTOM_CENTER = 0x51
 GRAVITY_START_CV = 0x00800013
 T_DIMENSION, DP12 = 0x05, (12 << 8) | 1
 ID_MBC = res_id("id", "menu_button_container")
+# extensions button on the browser toolbar: hidden (gone and zero size, so the code cannot bring it back)
+EXT_IDS = {int(m.group(2), 16): m.group(1) for m in re.finditer(
+    r'type="id" name="([^"]*extension[^"]*button[^"]*)" id="(0x[0-9a-f]+)"', pub)}
+print("extensions button ids:", sorted(EXT_IDS.values()))
 
 
 
@@ -443,6 +447,7 @@ def patch_layouts(zin):
     changed = {}
     found = {"recycler": 0, "card": 0, "hub": 0}
     ntp = {"bottom": 0, "tiles": 0}
+    found_ext = []
     if "--no-toolbar" not in OPTS:
         found["toolbar"] = 0
     for info in zin.infolist():
@@ -530,6 +535,12 @@ def patch_layouts(zin):
             # home page content sits at the bottom (the code makes the page as tall as the screen)
             x.set(root, "gravity", T_INT_HEX, GRAVITY_BOTTOM_CENTER)
             ntp["bottom"] += 1; mod = True
+        for nd, _ in els:
+            if el_id(x, nd) in EXT_IDS:
+                x.set(nd, "visibility", T_INT_DEC, 2)
+                x.set(nd, "layout_width", T_DIMENSION, 0)
+                x.set(nd, "layout_height", T_DIMENSION, 0)
+                found_ext.append("%s in %s" % (EXT_IDS[el_id(x, nd)], n)); mod = True
         tiles_row = next((nd for nd, _ in els if (x.tag(nd) or "").endswith("MostVisitedTilesLayout")), None)
         if tiles_row is not None:
             # home page speed dial right to left: the row fills the width and lays tiles out from the right
@@ -544,6 +555,7 @@ def patch_layouts(zin):
             changed[n] = out
             print("patched %s (%s)" % (n, tag))
     print("found:", found, "home page:", ntp)
+    print("extensions button hidden:", found_ext)
     if not all(found.values()):
         die("not all layouts found")
     return changed
@@ -910,11 +922,13 @@ cat > $CD/tb/CloseAllButton.smali <<SMEOF
     return-void
 .end method
 
-# draws a double cross in the button's icon colour
+# draws the 'close all tabs' icon (two stacked tabs, the front one crossed) on a rounded tonal square
 .method protected onDraw(Landroid/graphics/Canvas;)V
-    .locals 9
+    .locals 11
     invoke-super {p0, p1}, $SUPER;->onDraw(Landroid/graphics/Canvas;)V
     :draw_try
+    invoke-virtual {p1}, Landroid/graphics/Canvas;->save()I
+    move-result v10
     new-instance v0, Landroid/graphics/Paint;
     const/4 v1, 0x1
     invoke-direct {v0, v1}, Landroid/graphics/Paint;-><init>(I)V
@@ -928,55 +942,82 @@ cat > $CD/tb/CloseAllButton.smali <<SMEOF
     move-result v2
     :tint_done
     invoke-virtual {v0, v2}, Landroid/graphics/Paint;->setColor(I)V
-    sget-object v1, Landroid/graphics/Paint\$Style;->STROKE:Landroid/graphics/Paint\$Style;
-    invoke-virtual {v0, v1}, Landroid/graphics/Paint;->setStyle(Landroid/graphics/Paint\$Style;)V
-    sget-object v1, Landroid/graphics/Paint\$Cap;->ROUND:Landroid/graphics/Paint\$Cap;
-    invoke-virtual {v0, v1}, Landroid/graphics/Paint;->setStrokeCap(Landroid/graphics/Paint\$Cap;)V
+    move-object v4, p1
+    move-object v9, v0
+    invoke-virtual {p0}, Landroid/view/View;->getWidth()I
+    move-result v1
+    int-to-float v5, v1
+    invoke-virtual {p0}, Landroid/view/View;->getHeight()I
+    move-result v1
+    int-to-float v6, v1
+    invoke-static {v5, v6}, Ljava/lang/Math;->min(FF)F
+    move-result v7
+    const v1, 0x3f000000
+    mul-float/2addr v5, v1
+    mul-float/2addr v6, v1
+    invoke-virtual {v4, v5, v6}, Landroid/graphics/Canvas;->translate(FF)V
+    const/16 v1, 0x1c
+    invoke-virtual {v0, v1}, Landroid/graphics/Paint;->setAlpha(I)V
+    const v1, 0x3f000000
+    mul-float v8, v7, v1
+    neg-float v5, v8
+    new-instance v3, Landroid/graphics/RectF;
+    invoke-direct {v3, v5, v5, v8, v8}, Landroid/graphics/RectF;-><init>(FFFF)V
+    const v1, 0x3e8f5c29
+    mul-float v6, v7, v1
+    invoke-virtual {v4, v3, v6, v6, v9}, Landroid/graphics/Canvas;->drawRoundRect(Landroid/graphics/RectF;FFLandroid/graphics/Paint;)V
     invoke-virtual {p0}, Landroid/view/View;->getResources()Landroid/content/res/Resources;
     move-result-object v1
     invoke-virtual {v1}, Landroid/content/res/Resources;->getDisplayMetrics()Landroid/util/DisplayMetrics;
     move-result-object v1
-    iget v3, v1, Landroid/util/DisplayMetrics;->density:F
-    const/high16 v1, 0x40000000
-    mul-float/2addr v1, v3
+    iget v1, v1, Landroid/util/DisplayMetrics;->density:F
+    invoke-virtual {v4, v1, v1}, Landroid/graphics/Canvas;->scale(FF)V
+    const/16 v1, 0xff
+    invoke-virtual {v0, v1}, Landroid/graphics/Paint;->setAlpha(I)V
+    sget-object v1, Landroid/graphics/Paint\$Style;->STROKE:Landroid/graphics/Paint\$Style;
+    invoke-virtual {v0, v1}, Landroid/graphics/Paint;->setStyle(Landroid/graphics/Paint\$Style;)V
+    sget-object v1, Landroid/graphics/Paint\$Cap;->ROUND:Landroid/graphics/Paint\$Cap;
+    invoke-virtual {v0, v1}, Landroid/graphics/Paint;->setStrokeCap(Landroid/graphics/Paint\$Cap;)V
+    sget-object v1, Landroid/graphics/Paint\$Join;->ROUND:Landroid/graphics/Paint\$Join;
+    invoke-virtual {v0, v1}, Landroid/graphics/Paint;->setStrokeJoin(Landroid/graphics/Paint\$Join;)V
+    const v1, 0x40000000
     invoke-virtual {v0, v1}, Landroid/graphics/Paint;->setStrokeWidth(F)V
-    invoke-virtual {p0}, Landroid/view/View;->getWidth()I
-    move-result v4
-    int-to-float v4, v4
-    const/high16 v1, 0x3f000000
-    mul-float/2addr v4, v1
-    invoke-virtual {p0}, Landroid/view/View;->getHeight()I
-    move-result v5
-    int-to-float v5, v5
-    mul-float/2addr v5, v1
-    const/high16 v6, 0x40800000
-    mul-float/2addr v6, v3
-    const/high16 v7, 0x40a00000
-    mul-float/2addr v7, v3
-    sub-float v8, v4, v7
-    invoke-static {p1, v0, v8, v5, v6}, Ltb/CloseAllButton;->x(Landroid/graphics/Canvas;Landroid/graphics/Paint;FFF)V
-    add-float v8, v4, v7
-    invoke-static {p1, v0, v8, v5, v6}, Ltb/CloseAllButton;->x(Landroid/graphics/Canvas;Landroid/graphics/Paint;FFF)V
+    const v5, 0xc1480000
+    const v6, 0xc0e00000
+    const v7, 0x40e00000
+    const v8, 0x41480000
+    invoke-virtual {v3, v5, v6, v7, v8}, Landroid/graphics/RectF;->set(FFFF)V
+    const v1, 0x40800000
+    invoke-virtual {v4, v3, v1, v1, v9}, Landroid/graphics/Canvas;->drawRoundRect(Landroid/graphics/RectF;FFLandroid/graphics/Paint;)V
+    new-instance v2, Landroid/graphics/Path;
+    invoke-direct {v2}, Landroid/graphics/Path;-><init>()V
+    const v5, 0xc0e00000
+    const v6, 0xc1180000
+    invoke-virtual {v2, v5, v6}, Landroid/graphics/Path;->moveTo(FF)V
+    const v6, 0xc1480000
+    invoke-virtual {v2, v5, v6}, Landroid/graphics/Path;->lineTo(FF)V
+    const v5, 0x41480000
+    invoke-virtual {v2, v5, v6}, Landroid/graphics/Path;->lineTo(FF)V
+    const v6, 0x40e00000
+    invoke-virtual {v2, v5, v6}, Landroid/graphics/Path;->lineTo(FF)V
+    const v5, 0x41180000
+    invoke-virtual {v2, v5, v6}, Landroid/graphics/Path;->lineTo(FF)V
+    invoke-virtual {v4, v2, v9}, Landroid/graphics/Canvas;->drawPath(Landroid/graphics/Path;Landroid/graphics/Paint;)V
+    const v5, 0xc0c80000
+    const v6, 0xbf400000
+    const v7, 0x3f400000
+    const v8, 0x40c80000
+    invoke-virtual/range {v4 .. v9}, Landroid/graphics/Canvas;->drawLine(FFFFLandroid/graphics/Paint;)V
+    const v5, 0x3f400000
+    const v6, 0xbf400000
+    const v7, 0xc0c80000
+    const v8, 0x40c80000
+    invoke-virtual/range {v4 .. v9}, Landroid/graphics/Canvas;->drawLine(FFFFLandroid/graphics/Paint;)V
+    invoke-virtual {p1, v10}, Landroid/graphics/Canvas;->restoreToCount(I)V
     :draw_end
     .catch Ljava/lang/Throwable; {:draw_try .. :draw_end} :draw_fail
     return-void
     :draw_fail
-    return-void
-.end method
-
-# one cross: centre (p2, p3), half size p4
-.method private static x(Landroid/graphics/Canvas;Landroid/graphics/Paint;FFF)V
-    .locals 6
-    move-object v0, p0
-    move-object v5, p1
-    sub-float v1, p2, p4
-    sub-float v2, p3, p4
-    add-float v3, p2, p4
-    add-float v4, p3, p4
-    invoke-virtual/range {v0 .. v5}, Landroid/graphics/Canvas;->drawLine(FFFFLandroid/graphics/Paint;)V
-    add-float v2, p3, p4
-    sub-float v4, p3, p4
-    invoke-virtual/range {v0 .. v5}, Landroid/graphics/Canvas;->drawLine(FFFFLandroid/graphics/Paint;)V
     return-void
 .end method
 SMEOF
