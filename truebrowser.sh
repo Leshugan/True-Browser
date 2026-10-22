@@ -73,6 +73,7 @@ ATTR = {  # android attribute resource ids
     "onClick": 0x0101026F,
     "contentDescription": 0x01010273,
     "tooltipText": 0x01010534,
+    "fillViewport": 0x0101017A,
     "background": 0x010100D4,
     "layout_marginStart": 0x010103B5,
     "layoutDirection": 0x010103B2,
@@ -400,7 +401,7 @@ APP_NAME = "True Browser"
 ROT180 = struct.unpack("<I", struct.pack("<f", 180.0))[0]
 MATCH_PARENT, WRAP_CONTENT, GRAVITY_BOTTOM = 0xFFFFFFFF, 0xFFFFFFFE, 0x50
 RTL, LTR = 1, 0
-MIRROR = struct.unpack("<I", struct.pack("<f", -1.0))[0]
+T_BOOLEAN, TRUE = 0x12, 0xFFFFFFFF
 
 
 def die(msg):
@@ -529,14 +530,14 @@ def patch_layouts(zin):
             # home page content sits at the bottom (the code makes the page as tall as the screen)
             x.set(root, "gravity", T_INT_HEX, GRAVITY_BOTTOM_CENTER)
             ntp["bottom"] += 1; mod = True
-        if any((x.tag(nd) or "").endswith("MostVisitedTilesLayout") for nd, _ in els) \
-                or (tag.startswith("org.chromium.chrome.browser.suggestions.tile.")
-                    and ".tile_edit_dialog." not in tag):
-            # home page speed dial right to left: the row is mirrored and every tile mirrored back
-            # (a mirror keeps touch working; right-to-left layout direction broke the "+" tile)
-            x.set(root, "scaleX", T_FLOAT, MIRROR)
+        tiles_row = next((nd for nd, _ in els if (x.tag(nd) or "").endswith("MostVisitedTilesLayout")), None)
+        if tiles_row is not None:
+            # home page speed dial right to left: the row fills the width and lays tiles out from the right
+            # (no mirroring: a mirrored row showed reversed text while a tile is held)
+            x.set(root, "fillViewport", T_BOOLEAN, TRUE)
+            x.set(tiles_row, "layoutDirection", T_INT_DEC, RTL)
             ntp["tiles"] += 1; mod = True
-            print("mirrored %s (%s)" % (n, tag))
+            print("tiles row right to left: %s" % n)
         if mod:
             out = x.tobytes()
             AXML(out)  # sanity re-parse
@@ -980,6 +981,18 @@ cat > $CD/tb/CloseAllButton.smali <<SMEOF
 .end method
 SMEOF
 echo "close-all: id $CLOSE_ID, button based on $SUPER, code in $CD"
+# bottom address bar also on the home page: the position decision ignores "home page is showing"
+TP=$(grep -rl 'cr_ToolbarPosition' code/smali* | head -1)
+python3 - "$TP" <<'TPEOF'
+import sys
+f = sys.argv[1]; s = open(f).read()
+h = ".method public static a(ZZZZZZZZI)I\n    .locals 2\n"
+assert s.count(h) == 1, "toolbar position method not found"
+s = s.replace(h, h + "    # True Browser: home page does not force the toolbar to the top\n    const/4 p1, 0x0\n")
+open(f, "w").write(s)
+print("toolbar position patched in", f)
+TPEOF
+KEEP="$KEEP $(dirname "$TP")"
 for d in code/smali*; do case " $KEEP " in *" $d "*) ;; *) rm -rf "$d";; esac; done
 java -Xmx8g -jar apktool.jar b -o code.apk code > codebuild.log 2>&1 || (tail -50 codebuild.log; exit 1)
 REPL=()
