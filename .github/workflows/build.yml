@@ -368,12 +368,13 @@ jobs:
             3. Package renamed to leshugan.truebrowser.
           """
           import re, struct, sys, zipfile
-          from axml import AXML, T_FLOAT, T_INT_DEC, T_INT_HEX, NONE
+          from axml import AXML, T_FLOAT, T_INT_DEC, T_INT_HEX, T_REFERENCE, T_STRING, NONE
 
           SRC, PUBLIC, DST = sys.argv[1:4]
           OPTS = set(sys.argv[4:])
           OLD_PKG = "io.github.jqssun.helium"
           NEW_PKG = "leshugan.truebrowser"
+          APP_NAME = "True Browser"
           ROT180 = struct.unpack("<I", struct.pack("<f", 180.0))[0]
           MATCH_PARENT, WRAP_CONTENT, GRAVITY_BOTTOM = 0xFFFFFFFF, 0xFFFFFFFE, 0x50
           RTL, LTR = 1, 0
@@ -411,7 +412,9 @@ jobs:
 
           def patch_layouts(zin):
               changed = {}
-              found = {"recycler": 0, "card": 0, "hub": 0, "toolbar": 0}
+              found = {"recycler": 0, "card": 0, "hub": 0}
+              if "--toolbar" in OPTS:
+                  found["toolbar"] = 0
               for info in zin.infolist():
                   n = info.filename
                   if not (n.startswith("res/") and n.endswith(".xml")):
@@ -450,7 +453,7 @@ jobs:
                       if c != 1 or i != 1:
                           die("hub layout %s: container=%d toolbar include=%d" % (n, c, i))
                       found["hub"] += 1; mod = True
-                  if any(el_id(x, nd) == ID_TAC for nd, _ in els):
+                  if "--toolbar" in OPTS and any(el_id(x, nd) == ID_TAC for nd, _ in els):
                       # tab switcher toolbar: put "+" right after the tabs/groups switcher
                       byid = {el_id(x, nd): (nd, par) for nd, par in els if el_id(x, nd) is not None}
                       if ID_TAB not in byid:
@@ -486,6 +489,22 @@ jobs:
                       x.strings[i] = NEW_PKG + s[len(OLD_PKG):]
                       cnt += 1
               print("manifest strings renamed:", cnt)
+              # app name: application/activity labels pointing to the app-name string -> literal "True Browser"
+              els = list(x.elements())
+              app = next(nd for nd, _ in els if x.tag(nd) == "application")
+              lab = next((a for a in app.attrs if x.attr_res(a) == 0x01010001), None)
+              if lab is not None and lab.dtype == T_REFERENCE:
+                  ref = lab.data
+                  idx = x.string_index(APP_NAME)
+                  n = 0
+                  for nd, _ in els:
+                      for a in nd.attrs:
+                          if x.attr_res(a) == 0x01010001 and a.dtype == T_REFERENCE and a.data == ref:
+                              a.raw, a.dtype, a.data = idx, T_STRING, idx
+                              n += 1
+                  print("app name labels replaced:", n)
+              else:
+                  print("WARNING: application label is not a reference:", lab and (lab.dtype, lab.data))
               out = x.tobytes()
               AXML(out)
               return {"AndroidManifest.xml": out}
@@ -542,6 +561,11 @@ jobs:
           R=report.txt
           echo "$TAG" > $R; cat build-log.txt >> $R
           dump() { echo "################ $1 ($(wc -l < "$1") lines)" >> $R; grep -v '^\s*\.line\|^\s*$' "$1" >> $R; }
+          echo "=== TOOLBAR CRASH HUNT: code touching the switcher card / action row layout params" >> $R
+          for f in $(grep -rlE 'HubToolbarView;->D:|0x7f010950|0x7f010d6b|0x7f010d6d|0x7f010d6c' dec/smali* | head -20); do
+            echo ">> $f" >> $R
+            grep -n -B4 -A14 -E 'HubToolbarView;->D:|0x7f010950|0x7f010d6b|0x7f010d6d|0x7f010d6c' "$f" | grep -v '\.line' | grep -E 'LayoutParams|check-cast|getParent|0x7f01|HubToolbarView;->|invoke' | head -60 >> $R
+          done
           echo "=== LAYOUTS WITH close_all_tabs_button" >> $R
           for f in $(grep -l 'close_all_tabs_button' dec/res/layout*/*.xml); do echo "##### $f" >> $R; cat "$f" >> $R; echo >> $R; done
           echo "=== CLOSE-ALL CODE" >> $R
