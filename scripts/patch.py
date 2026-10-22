@@ -141,7 +141,8 @@ def arm64_only():
             log.append("removed lib/" + abi)
 
 
-arm64_only()
+if "--keep-abis" not in OPTS:
+    arm64_only()
 if "--no-layout" not in OPTS:
     layout_patches()
 if "--no-rename" not in OPTS:
