@@ -225,6 +225,37 @@ class AXML:
         a.name = self.attr_name(new)
         return True
 
+    # ---------- tree editing ----------
+    def span(self, nd):
+        """(first, last) node indices of an element including its children."""
+        i = next(k for k, n in enumerate(self.nodes) if n is nd)
+        depth = 0
+        for j in range(i, len(self.nodes)):
+            k = self.nodes[j].kind
+            if k == XML_START_EL:
+                depth += 1
+            elif k == XML_END_EL:
+                depth -= 1
+                if depth == 0:
+                    return i, j
+        raise ValueError("unbalanced element")
+
+    def move_after_start(self, nd, parent):
+        """Move element nd (with children) to be the first child of parent."""
+        i, j = self.span(nd)
+        block = self.nodes[i:j + 1]
+        del self.nodes[i:j + 1]
+        p = next(k for k, n in enumerate(self.nodes) if n is parent)
+        self.nodes[p + 1:p + 1] = block
+
+    def move_after(self, nd, sibling):
+        """Move element nd (with children) right after element sibling."""
+        i, j = self.span(nd)
+        block = self.nodes[i:j + 1]
+        del self.nodes[i:j + 1]
+        _, e = self.span(sibling)
+        self.nodes[e + 1:e + 1] = block
+
     # ---------- write ----------
     def tobytes(self):
         for nd in self.nodes:

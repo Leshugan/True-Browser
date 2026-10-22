@@ -40,6 +40,11 @@ def res_id(typ, name):
 ID_TLRV = res_id("id", "tab_list_recycler_view")
 ID_HPHC = res_id("id", "hub_pane_host_container")
 ID_HMC = res_id("id", "hub_main_container")
+ID_TAC = res_id("id", "toolbar_action_container")
+ID_TAB = res_id("id", "toolbar_action_button")
+ID_PSC = res_id("id", "pane_switcher_card")
+ID_PS = res_id("id", "pane_switcher")
+GRAVITY_CENTER = 0x11
 
 
 def el_id(x, nd):
@@ -49,7 +54,7 @@ def el_id(x, nd):
 
 def patch_layouts(zin):
     changed = {}
-    found = {"recycler": 0, "card": 0, "hub": 0}
+    found = {"recycler": 0, "card": 0, "hub": 0, "toolbar": 0}
     for info in zin.infolist():
         n = info.filename
         if not (n.startswith("res/") and n.endswith(".xml")):
@@ -88,13 +93,30 @@ def patch_layouts(zin):
             if c != 1 or i != 1:
                 die("hub layout %s: container=%d toolbar include=%d" % (n, c, i))
             found["hub"] += 1; mod = True
+        if any(el_id(x, nd) == ID_TAC for nd, _ in els):
+            # tab switcher toolbar: put "+" right after the tabs/groups switcher
+            byid = {el_id(x, nd): (nd, par) for nd, par in els if el_id(x, nd) is not None}
+            if ID_TAB not in byid:
+                die("toolbar %s: no action button" % n)
+            btn, btn_parent = byid[ID_TAB]
+            if ID_PSC in byid:  # switcher in a card: card goes first into the "+" row, row centered
+                card = byid[ID_PSC][0]
+                x.move_after_start(card, btn_parent)
+                x.set(btn_parent, "layout_gravity", T_INT_HEX, GRAVITY_CENTER)
+                print("toolbar %s: card moved before +" % n)
+            elif ID_PS in byid:  # plain switcher in one row: "+" goes after it
+                x.move_after(btn, byid[ID_PS][0])
+                print("toolbar %s: + moved after switcher" % n)
+            else:
+                die("toolbar %s: no switcher" % n)
+            found["toolbar"] += 1; mod = True
         if mod:
             out = x.tobytes()
             AXML(out)  # sanity re-parse
             changed[n] = out
             print("patched %s (%s)" % (n, tag))
     print("found:", found)
-    if not found["recycler"] or not found["card"] or not found["hub"]:
+    if not all(found.values()):
         die("not all layouts found")
     return changed
 
