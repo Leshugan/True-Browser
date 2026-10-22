@@ -3,6 +3,7 @@
 # Started by .github/workflows/build.yml every time a file is uploaded to the repo root.
 # Results (Actions -> run -> Artifacts): TrueBrowser-<ver>-arm64.apk and report.txt
 set -eo pipefail
+trap 'echo "FAILED at line $LINENO: $BASH_COMMAND"' ERR
 REPO=$(cd "$(dirname "$0")" && pwd)
 cd "$GITHUB_WORKSPACE"
 
@@ -673,8 +674,8 @@ SMEOF
 } > closeall.txt 2>&1 || true
 # "close all tabs" button: the button calls tbCloseAll, which runs the same action as the menu item
 { echo "=== menu item handler (onOptionsItemSelected)"
-  grep -rn -A14 'method.* onOptionsItemSelected(Landroid/view/MenuItem;)Z' code/smali*/org/chromium/chrome/browser/*Activity.smali | grep -v '\.line' | head -60
-} >> closeall.txt
+  grep -rn -A14 --include='*Activity.smali' 'method.* onOptionsItemSelected(Landroid/view/MenuItem;)Z' code/smali*/org/chromium/chrome/browser | grep -v '\.line' | head -60
+} >> closeall.txt 2>&1 || true
 CD=${C%%/org/*}
 mkdir -p $CD/tb
 cat > $CD/tb/CloseAllItem.smali <<SMEOF
