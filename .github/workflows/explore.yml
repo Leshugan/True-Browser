@@ -37,53 +37,27 @@ jobs:
       - name: Report
         shell: bash {0}
         run: |
-          R=report3.txt
+          R=report4.txt
           cat info.txt > $R
           P=dec/res/values/public.xml
-          id() { grep -oE "type=\"$1\" name=\"$2\" id=\"0x[0-9a-f]+\"" $P | grep -oE '0x[0-9a-f]+'; }
-          smali_of() { grep -rlE --include=*.smali "$1" dec/smali* 2>/dev/null; }
-          dump() {  # $1 = smali file
-            echo "################ $1 ($(wc -l < "$1") lines)" >> $R
-            cat "$1" >> $R
-          }
-
-          echo "=== IDS" >> $R
-          grep -E 'type="id" name="[a-z_]*(close_all|menu_button|toolbar_action|pane_switcher|search_box|new_tab|tile|most_visited|mv_tiles|ntp|feed_stream|search_provider|logo)[a-z_]*"' $P >> $R
-          grep -E 'type="(string|plurals)" name="[a-z_]*(close_all)[a-z_]*"' $P >> $R
-          grep -E 'type="layout" name="[a-z_]*(hub|tile|most_visited|mv_|ntp|new_tab_page)[a-z_]*"' $P >> $R
-
-          echo "=== HUB TOOLBAR (full)" >> $R
-          for f in $(ls dec/smali*/org/chromium/chrome/browser/hub/HubToolbar*.smali dec/smali*/org/chromium/chrome/browser/hub/HubBottomToolbar*.smali 2>/dev/null); do dump "$f"; done
-
-          echo "=== WHO USES toolbar_action_button / pane_switcher_card / toolbar_action_container" >> $R
-          for n in toolbar_action_button pane_switcher_card toolbar_action_container menu_button_container; do
-            h=$(id id $n); echo "--- $n $h" >> $R
-            for f in $(smali_of "$h" | head -8); do
-              echo ">> $f" >> $R
-              grep -n -B3 -A25 "$h" "$f" | head -120 >> $R
-            done
+          dump() { echo "################ $1 ($(wc -l < "$1") lines)" >> $R; grep -v '^\s*\.line\|^\s*$' "$1" >> $R; }
+          echo "=== LAYOUTS WITH close_all_tabs_button_container" >> $R
+          for f in $(grep -l 'close_all_tabs_button' dec/res/layout*/*.xml); do echo "##### $f" >> $R; cat "$f" >> $R; echo >> $R; done
+          echo "=== CLOSE-ALL CODE" >> $R
+          dump dec/smali/ae0.smali
+          dump dec/smali/ld0.smali
+          f=dec/smali/fe0.smali; echo "################ $f (part)" >> $R
+          grep -n -B60 -A60 '0x7f0102c6' $f | grep -v '\.line' >> $R
+          echo "=== NTP" >> $R
+          for f in $(grep -lE 'NewTabPageLayout|ntp_scrollview|search_box_stub' dec/res/layout*/*.xml); do echo "##### $f" >> $R; cat "$f" >> $R; echo >> $R; done
+          h=$(grep -oE 'type="layout" name="[^"]*" id="0x7f0e[0-9a-f]+"' $P | head -0)
+          for c in ntp/NewTabPageLayout suggestions/tile/MostVisitedTilesLayout; do
+            for f in $(ls dec/smali*/org/chromium/chrome/browser/$c.smali 2>/dev/null); do dump "$f"; done
           done
-
-          echo "=== CLOSE ALL TABS" >> $R
-          for n in $(grep -oE 'type="id" name="[a-z_]*close_all[a-z_]*"' $P | sed -E 's/.*name="([^"]+)".*/\1/'); do
-            h=$(id id $n); echo "--- id $n $h" >> $R
-            for f in $(smali_of "$h" | head -8); do
-              echo ">> $f" >> $R
-              grep -n -B15 -A40 "$h" "$f" | head -200 >> $R
-            done
-          done
-
-          echo "=== NTP TILES LAYOUTS" >> $R
-          for f in $(grep -lE 'MostVisited|TileView|tile_view|mv_tiles|TilesLayout|tiles_layout' dec/res/layout*/*.xml | head -15); do
-            echo "##### $f" >> $R; head -c 5000 "$f" >> $R; echo >> $R
-          done
-          echo "=== NTP TILES CLASSES" >> $R
-          ls dec/smali*/org/chromium/chrome/browser/suggestions/tile/ 2>/dev/null >> $R
-          for f in $(ls dec/smali*/org/chromium/chrome/browser/suggestions/tile/*Layout*.smali dec/smali*/org/chromium/chrome/browser/suggestions/tile/MostVisitedTilesLayout*.smali 2>/dev/null | sort -u | head -4); do dump "$f"; done
           wc -c $R
 
       - name: Upload report
         uses: actions/upload-artifact@v7
         with:
-          path: report3.txt
+          path: report4.txt
           archive: false
