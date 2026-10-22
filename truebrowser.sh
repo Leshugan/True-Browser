@@ -683,43 +683,17 @@ s = s[:i] + inj + s[i:]
 open(f, "w").write(s)
 print("NewTabPageLayout.onMeasure patched")
 SMEOF
-{ # data for the "close all tabs" button (read by Claude)
-  echo "=== CLOSE ALL TABS: ids"
-  grep -E 'name="[^"]*close_all[^"]*"' public.xml
-  for id in $(grep -E 'type="id" name="[^"]*close_all[^"]*"' public.xml | grep -oE '0x7f[0-9a-f]+'); do
-    for f in $(grep -rl "$id" code/smali* | head -6); do
-      echo ">> $id in $f ($(wc -l < "$f") lines)"
-      grep -n -B30 -A40 "$id" "$f" | grep -v '\.line\|^[0-9]*-\s*$' | head -160
-    done
+{ # data for the address bar on the home page (read by Claude)
+  N=$(grep -rl 'Ld3a;' code/smali* | xargs grep -l '^\.field .* G:Ld3a;' 2>/dev/null | head -1)
+  echo "=== HOME PAGE object: $N"
+  [ -n "$N" ] && { sed -n '1,12p' "$N"; grep -n '^\.method' "$N"; }
+  echo "=== its boolean methods"
+  [ -n "$N" ] && awk '/^\.method .*\)Z$/{f=1} f{print} f&&/^\.end method/{f=0}' "$N" | grep -v '^\s*\.line\|^\s*$' | head -260
+  for T in $(ls code/smali*/org/chromium/chrome/browser/toolbar/top/ToolbarPhone.smali 2>/dev/null); do
+    echo "=== ToolbarPhone: boolean calls on interfaces (with context)"
+    grep -n -B6 -A3 -E 'invoke-interface \{[^}]*\}, L[a-z0-9]+;->[a-zA-Z0-9]+\(\)Z' "$T" | grep -v '\.line\|^\S*-\s*$' | head -200
   done
 } > closeall.txt 2>&1 || true
-# "close all tabs" button: runs the same action as the menu item
-{ echo "=== menu item handler (onOptionsItemSelected)"
-  grep -rn -A14 --include='*Activity.smali' 'method.* onOptionsItemSelected(Landroid/view/MenuItem;)Z' code/smali*/org/chromium/chrome/browser | grep -v '\.line' | head -60
-} >> closeall.txt 2>&1 || true
-{ echo "=== CLOSE ALL: handler method in ChromeTabbedActivity"
-  awk -v id="$CLOSE_ID" '/^\.method/{h=$0; n=NR} index($0, "const v3, " id){print n": "h; print "branch at line " NR}' "$C"
-  L=$(grep -n "const v3, $CLOSE_ID" "$C" | head -1 | cut -d: -f1)
-  sed -n "$((L-5)),$((L+70))p" "$C" | grep -v '^\s*\.line\|^\s*$'
-  M=$(awk -v id="$CLOSE_ID" '/^\.method/{h=$0} index($0, "const v3, " id){print h; exit}' "$C" | awk '{print $NF}')
-  echo "=== callers of $M"
-  grep -rn -F "ChromeTabbedActivity;->$M" code/smali* | head -20
-  echo "=== Lwt2;->a and Lyt2"
-  for c in wt2 yt2 nlf; do f=$(ls code/smali*/$c.smali 2>/dev/null | head -1); [ -n "$f" ] && { echo ">> $f"; grep -v '^\s*\.line\|^\s*$' "$f" | head -150; }; done
-  echo "=== TOOLBAR POSITION: decision method and its callers"
-  TP=$(grep -rl 'cr_ToolbarPosition' code/smali* | head -1)
-  if [ -n "$TP" ]; then
-    echo ">> $TP"
-    awk '/^\.method public static a\(ZZZZZZZZI\)I/{f=1} f{print} f&&/^\.end method/{exit}' "$TP" | grep -v '^\s*\.line\|^\s*$'
-    K=$(basename "$TP" .smali)
-    grep -rn -B30 "L$K;->a(ZZZZZZZZI)I" code/smali* | grep -v '\.line\|^\S*-\s*$' | head -120
-  fi
-  echo "=== TOOLBAR POSITION (bottom bar vs home page)"
-  for f in $(grep -rlE 'ToolbarPosition|BottomToolbar|bottom_toolbar|ANDROID_BOTTOM|AndroidBottom' code/smali* | head -15); do
-    echo ">> $f ($(wc -l < "$f") lines)"
-    grep -n -E 'ToolbarPosition|BottomToolbar|bottom_toolbar|ANDROID_BOTTOM|AndroidBottom|\.method' "$f" | head -40
-  done
-} >> closeall.txt 2>&1 || true
 # the main code file is full (65536 limit): all new code goes into a new, extra code file
 CD=code/smali_classes$(( $(unzip -Z1 app.apk | grep -cE '^classes[0-9]*\.dex$') + 1 ))
 KEEP="$KEEP $CD"
