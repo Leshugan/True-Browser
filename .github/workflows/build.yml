@@ -63,11 +63,15 @@ jobs:
       - name: Build
         run: |
           set -eo pipefail
-          ls scripts/patch_apk.py scripts/axml.py
+          PATCH=$(find . -name patch_apk.py -not -path './.git/*' | head -1)
+          AX=$(find . -name axml.py -not -path './.git/*' | head -1)
+          echo "Scripts: [$PATCH] [$AX]"
+          [ -n "$PATCH" ] && [ -n "$AX" ] || { echo "patch_apk.py / axml.py not found in the repo:"; find . -not -path './.git/*' -type f | head -50; exit 1; }
+          export PYTHONPATH="$(dirname "$AX")"
           mkdir -p out
           build() {  # $1 = output name, rest = patch options
             n=$1; shift
-            python3 scripts/patch_apk.py app.apk public.xml p.apk "$@" | tee patch.log
+            python3 "$PATCH" app.apk public.xml p.apk "$@" | tee patch.log
             for f in $(grep -oE '^patched [^ ]+' patch.log | cut -d' ' -f2); do
               echo "----- $f"; $BT/aapt2 dump xmltree --file "$f" p.apk | head -60
             done
