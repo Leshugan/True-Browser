@@ -66,6 +66,7 @@ ATTR = {  # android attribute resource ids
     "layout_marginTop": 0x010100F8,
     "layout_marginBottom": 0x010100FA,
     "rotation": 0x01010326,
+    "scaleX": 0x01010324,
     "layoutDirection": 0x010103B2,
     "gravity": 0x010100AF,
 }
@@ -364,6 +365,7 @@ APP_NAME = "True Browser"
 ROT180 = struct.unpack("<I", struct.pack("<f", 180.0))[0]
 MATCH_PARENT, WRAP_CONTENT, GRAVITY_BOTTOM = 0xFFFFFFFF, 0xFFFFFFFE, 0x50
 RTL, LTR = 1, 0
+MIRROR = struct.unpack("<I", struct.pack("<f", -1.0))[0]
 
 
 def die(msg):
@@ -465,10 +467,13 @@ def patch_layouts(zin):
             # home page content sits at the bottom (the code makes the page as tall as the screen)
             x.set(root, "gravity", T_INT_HEX, GRAVITY_BOTTOM_CENTER)
             ntp["bottom"] += 1; mod = True
-        if any((x.tag(nd) or "").endswith("MostVisitedTilesLayout") for nd, _ in els):
-            # home page speed dial: right to left
-            x.set(root, "layoutDirection", T_INT_DEC, RTL)
+        if any((x.tag(nd) or "").endswith("MostVisitedTilesLayout") for nd, _ in els) \
+                or tag.startswith("org.chromium.chrome.browser.suggestions.tile."):
+            # home page speed dial right to left: the row is mirrored and every tile mirrored back
+            # (a mirror keeps touch working; right-to-left layout direction broke the "+" tile)
+            x.set(root, "scaleX", T_FLOAT, MIRROR)
             ntp["tiles"] += 1; mod = True
+            print("mirrored %s (%s)" % (n, tag))
         if mod:
             out = x.tobytes()
             AXML(out)  # sanity re-parse
@@ -532,6 +537,9 @@ with zipfile.ZipFile(SRC) as zin:
 print("written", DST)
 PYEOF
 
+java -Xmx6g -jar apktool.jar d -s -f -o dec app.apk > decode.log 2>&1 || (tail -50 decode.log; exit 1)
+cp dec/res/values/public.xml public.xml && rm -rf dec
+
 echo "::group::Home page code (no search box, page as tall as the screen)"
 java -Xmx8g -jar apktool.jar d -r -f -o code app.apk > code.log 2>&1 || (tail -50 code.log; exit 1)
 F=$(ls code/smali*/org/chromium/chrome/browser/ntp/NewTabPageLayout.smali)
@@ -554,11 +562,21 @@ inj = """    # True Browser: hide the search box
     const/16 v1, 0x8
     invoke-virtual {v0, v1}, Landroid/view/View;->setVisibility(I)V
     :tb_search_done
-    # True Browser: page as tall as its container, so content (gravity bottom) sits at the bottom
+    # True Browser: page as tall as the scrolling list that holds it, so content (gravity bottom) sits at the bottom
     invoke-virtual {p0}, Landroid/view/View;->getParent()Landroid/view/ViewParent;
     move-result-object v0
+    :tb_walk
+    instance-of v1, v0, Landroidx/recyclerview/widget/RecyclerView;
+    if-nez v1, :tb_found
+    instance-of v1, v0, Landroid/widget/ScrollView;
+    if-nez v1, :tb_found
     instance-of v1, v0, Landroid/view/View;
     if-eqz v1, :tb_height_done
+    check-cast v0, Landroid/view/View;
+    invoke-virtual {v0}, Landroid/view/View;->getParent()Landroid/view/ViewParent;
+    move-result-object v0
+    goto :tb_walk
+    :tb_found
     check-cast v0, Landroid/view/View;
     invoke-virtual {v0}, Landroid/view/View;->getHeight()I
     move-result v1
@@ -584,6 +602,16 @@ s = s[:i] + inj + s[i:]
 open(f, "w").write(s)
 print("NewTabPageLayout.onMeasure patched")
 SMEOF
+{ # data for the "close all tabs" button (read by Claude)
+  echo "=== CLOSE ALL TABS: ids"
+  grep -E 'name="[^"]*close_all[^"]*"' public.xml
+  for id in $(grep -E 'type="id" name="[^"]*close_all[^"]*"' public.xml | grep -oE '0x7f[0-9a-f]+'); do
+    for f in $(grep -rl "$id" code/smali* | head -6); do
+      echo ">> $id in $f ($(wc -l < "$f") lines)"
+      grep -n -B30 -A40 "$id" "$f" | grep -v '\.line\|^[0-9]*-\s*$' | head -160
+    done
+  done
+} > closeall.txt 2>&1 || true
 for d in code/smali*; do [ "$d" = "$SD" ] || rm -rf "$d"; done
 java -Xmx8g -jar apktool.jar b -o code.apk code > codebuild.log 2>&1 || (tail -50 codebuild.log; exit 1)
 unzip -o -q code.apk "$DEX" -d newdex
@@ -591,8 +619,6 @@ echo "rebuilt $DEX ($(du -h newdex/$DEX | cut -f1))"
 echo "::endgroup::"
 
 echo "::group::Patch, align, sign"
-java -Xmx6g -jar apktool.jar d -s -f -o dec app.apk > decode.log 2>&1 || (tail -50 decode.log; exit 1)
-cp dec/res/values/public.xml public.xml && rm -rf dec
 python3 tb/patch_apk.py app.apk public.xml p.apk "--replace=$DEX=newdex/$DEX" | tee patch.log
 for f in $(grep -oE '^patched [^ ]+' patch.log | cut -d' ' -f2); do
   echo "----- $f"; $BT/aapt2 dump xmltree --file "$f" p.apk | head -80
@@ -611,5 +637,6 @@ echo "$TAG" > $R; cat patch.log xmltree.log >> $R
 echo "=== home page code: $F -> $DEX" >> $R
 grep -n -A45 'True Browser: hide' "$F" | grep -v '\.line' >> $R
 tail -20 codebuild.log >> $R
+cat closeall.txt >> $R
 wc -c $R
 echo "::endgroup::"
