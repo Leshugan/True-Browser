@@ -67,6 +67,7 @@ ATTR = {  # android attribute resource ids
     "layout_marginBottom": 0x010100FA,
     "rotation": 0x01010326,
     "layoutDirection": 0x010103B2,
+    "gravity": 0x010100AF,
 }
 
 
@@ -356,6 +357,7 @@ from axml import AXML, T_FLOAT, T_INT_DEC, T_INT_HEX, T_REFERENCE, T_STRING, NON
 
 SRC, PUBLIC, DST = sys.argv[1:4]
 OPTS = set(sys.argv[4:])
+REPLACE = dict(o[10:].split("=", 1) for o in OPTS if o.startswith("--replace="))
 OLD_PKG = "io.github.jqssun.helium"
 NEW_PKG = "leshugan.truebrowser"
 APP_NAME = "True Browser"
@@ -387,8 +389,7 @@ ID_TAB = res_id("id", "toolbar_action_button")
 ID_PSC = res_id("id", "pane_switcher_card")
 ID_PS = res_id("id", "pane_switcher")
 GRAVITY_CENTER = 0x11
-ID_SBS = res_id("id", "search_box_stub")
-T_DIMENSION = 0x05
+GRAVITY_BOTTOM_CENTER = 0x51
 
 
 def el_id(x, nd):
@@ -399,7 +400,7 @@ def el_id(x, nd):
 def patch_layouts(zin):
     changed = {}
     found = {"recycler": 0, "card": 0, "hub": 0}
-    ntp = {"search": 0, "tiles": 0}
+    ntp = {"bottom": 0, "tiles": 0}
     if "--no-toolbar" not in OPTS:
         found["toolbar"] = 0
     for info in zin.infolist():
@@ -461,11 +462,9 @@ def patch_layouts(zin):
                 die("toolbar %s: no switcher" % n)
             found["toolbar"] += 1; mod = True
         if tag.endswith("ntp.NewTabPageLayout"):
-            # home page: no search box (its stub inflates with zero height)
-            for nd, _ in els:
-                if el_id(x, nd) == ID_SBS:
-                    x.set(nd, "layout_height", T_DIMENSION, 0)
-                    ntp["search"] += 1; mod = True
+            # home page content sits at the bottom (the code makes the page as tall as the screen)
+            x.set(root, "gravity", T_INT_HEX, GRAVITY_BOTTOM_CENTER)
+            ntp["bottom"] += 1; mod = True
         if any((x.tag(nd) or "").endswith("MostVisitedTilesLayout") for nd, _ in els):
             # home page speed dial: right to left
             x.set(root, "layoutDirection", T_INT_DEC, RTL)
@@ -522,6 +521,8 @@ with zipfile.ZipFile(SRC) as zin:
             if n.startswith("META-INF/") and n.upper().endswith((".SF", ".RSA", ".EC", ".DSA", "MANIFEST.MF")):
                 continue  # old signature
             data = changed.get(n)
+            if data is None and n in REPLACE:
+                data = open(REPLACE[n], "rb").read(); print("replaced", n)
             if data is None:
                 data = zin.read(n)
             zi = zipfile.ZipInfo(n, date_time=info.date_time)
@@ -531,10 +532,68 @@ with zipfile.ZipFile(SRC) as zin:
 print("written", DST)
 PYEOF
 
+echo "::group::Home page code (no search box, page as tall as the screen)"
+java -Xmx8g -jar apktool.jar d -r -f -o code app.apk > code.log 2>&1 || (tail -50 code.log; exit 1)
+F=$(ls code/smali*/org/chromium/chrome/browser/ntp/NewTabPageLayout.smali)
+SD=${F%%/org/*}; DEX=${SD#code/}; DEX=${DEX/smali_/}; [ "$DEX" = smali ] && DEX=classes; DEX=$DEX.dex
+python3 - "$F" <<'SMEOF'
+import sys
+f = sys.argv[1]; s = open(f).read()
+anchor = "    invoke-super {p0, p1, p2}, Landroid/widget/LinearLayout;->onMeasure(II)V"
+m = s.index(".method public final onMeasure(II)V"); e = s.index(".end method", m)
+assert s[m:e].count(anchor) == 1, "onMeasure anchor not found"
+inj = """    # True Browser: hide the search box
+    iget-object v0, p0, Lorg/chromium/chrome/browser/ntp/NewTabPageLayout;->r:Lw2a;
+    if-eqz v0, :tb_search_done
+    iget-object v0, v0, Lw2a;->a:Ld3a;
+    iget-object v0, v0, Ld3a;->A:Lmea;
+    if-eqz v0, :tb_search_done
+    invoke-interface {v0}, Lmea;->a()Landroid/view/View;
+    move-result-object v0
+    if-eqz v0, :tb_search_done
+    const/16 v1, 0x8
+    invoke-virtual {v0, v1}, Landroid/view/View;->setVisibility(I)V
+    :tb_search_done
+    # True Browser: page as tall as its container, so content (gravity bottom) sits at the bottom
+    invoke-virtual {p0}, Landroid/view/View;->getParent()Landroid/view/ViewParent;
+    move-result-object v0
+    instance-of v1, v0, Landroid/view/View;
+    if-eqz v1, :tb_height_done
+    check-cast v0, Landroid/view/View;
+    invoke-virtual {v0}, Landroid/view/View;->getHeight()I
+    move-result v1
+    if-gtz v1, :tb_have_height
+    invoke-virtual {v0}, Landroid/view/View;->getMeasuredHeight()I
+    move-result v1
+    if-lez v1, :tb_height_done
+    :tb_have_height
+    invoke-virtual {v0}, Landroid/view/View;->getPaddingTop()I
+    move-result v2
+    sub-int/2addr v1, v2
+    invoke-virtual {v0}, Landroid/view/View;->getPaddingBottom()I
+    move-result v2
+    sub-int/2addr v1, v2
+    invoke-virtual {p0}, Landroid/view/View;->getMinimumHeight()I
+    move-result v2
+    if-eq v1, v2, :tb_height_done
+    invoke-virtual {p0, v1}, Landroid/view/View;->setMinimumHeight(I)V
+    :tb_height_done
+"""
+i = s.index(anchor, m)
+s = s[:i] + inj + s[i:]
+open(f, "w").write(s)
+print("NewTabPageLayout.onMeasure patched")
+SMEOF
+for d in code/smali*; do [ "$d" = "$SD" ] || rm -rf "$d"; done
+java -Xmx8g -jar apktool.jar b -o code.apk code > codebuild.log 2>&1 || (tail -50 codebuild.log; exit 1)
+unzip -o -q code.apk "$DEX" -d newdex
+echo "rebuilt $DEX ($(du -h newdex/$DEX | cut -f1))"
+echo "::endgroup::"
+
 echo "::group::Patch, align, sign"
 java -Xmx6g -jar apktool.jar d -s -f -o dec app.apk > decode.log 2>&1 || (tail -50 decode.log; exit 1)
 cp dec/res/values/public.xml public.xml && rm -rf dec
-python3 tb/patch_apk.py app.apk public.xml p.apk | tee patch.log
+python3 tb/patch_apk.py app.apk public.xml p.apk "--replace=$DEX=newdex/$DEX" | tee patch.log
 for f in $(grep -oE '^patched [^ ]+' patch.log | cut -d' ' -f2); do
   echo "----- $f"; $BT/aapt2 dump xmltree --file "$f" p.apk | head -80
 done > xmltree.log
@@ -547,26 +606,10 @@ echo "::endgroup::"
 
 echo "::group::Report for Claude"
 set +eo pipefail
-java -Xmx12g -jar apktool.jar d -f -o dec app.apk > decode.log 2>&1 || tail -50 decode.log
 R=report.txt
 echo "$TAG" > $R; cat patch.log xmltree.log >> $R
-dump() { echo "################ $1 ($(wc -l < "$1") lines)" >> $R; grep -v '^\s*\.line\|^\s*$' "$1" >> $R; }
-echo "=== HOME PAGE: speed dial layouts" >> $R
-for f in $(grep -lE 'MostVisitedTilesLayout|mv_tiles' dec/res/layout*/*.xml); do echo "##### $f" >> $R; cat "$f" >> $R; echo >> $R; done
-echo "=== HOME PAGE: who inflates / hosts NewTabPageLayout" >> $R
-ID=$(grep -oE 'type="layout" name="[^"]*" id="0x7f0e029b"' dec/res/values/public.xml)
-echo "$ID" >> $R
-for f in $(grep -rlE '0x7f0e029b|NewTabPageLayout;' dec/smali* | grep -v 'NewTabPageLayout.smali' | head -12); do
-  echo ">> $f ($(wc -l < "$f") lines)" >> $R
-  grep -n -B25 -A25 -E '0x7f0e029b|NewTabPageLayout;' "$f" | grep -v '\.line\|^\S*-\s*$' | head -150 >> $R
-done
-for c in ntp/NewTabPage ntp/NewTabPageView ntp/NewTabPageScrollView; do
-  for f in $(ls dec/smali*/org/chromium/chrome/browser/$c.smali 2>/dev/null); do
-    echo ">> $f" >> $R
-    grep -n -E '\.method|\.field|RecyclerView|ScrollView|LayoutParams|addView|inflate|0x7f0[1e]' "$f" | head -200 >> $R
-  done
-done
-echo "=== TAB SWITCHER: HubToolbarView (for the close-all button)" >> $R
-for f in $(ls dec/smali*/org/chromium/chrome/browser/hub/HubToolbarView.smali 2>/dev/null); do dump "$f"; done
+echo "=== home page code: $F -> $DEX" >> $R
+grep -n -A45 'True Browser: hide' "$F" | grep -v '\.line' >> $R
+tail -20 codebuild.log >> $R
 wc -c $R
 echo "::endgroup::"
