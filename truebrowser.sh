@@ -73,6 +73,8 @@ ATTR = {  # android attribute resource ids
     "onClick": 0x0101026F,
     "contentDescription": 0x01010273,
     "tooltipText": 0x01010534,
+    "background": 0x010100D4,
+    "layout_marginStart": 0x010103B5,
     "layoutDirection": 0x010103B2,
     "gravity": 0x010100AF,
 }
@@ -426,20 +428,9 @@ ID_PS = res_id("id", "pane_switcher")
 GRAVITY_CENTER = 0x11
 GRAVITY_BOTTOM_CENTER = 0x51
 GRAVITY_START_CV = 0x00800013
+T_DIMENSION, DP12 = 0x05, (12 << 8) | 1
 ID_MBC = res_id("id", "menu_button_container")
 
-
-def find_drawable():
-    for name in ("ic_close_all_tabs", "btn_close", "ic_close_white_24dp", "ic_close_24dp"):
-        m = re.search(r'type="drawable" name="%s" id="(0x[0-9a-f]+)"' % name, pub)
-        if m:
-            print("close-all icon:", name)
-            return int(m.group(1), 16)
-    print("close-all icon: android ic_menu_close_clear_cancel")
-    return 0x01080038
-
-
-ICON_CLOSE = find_drawable()
 
 
 def el_id(x, nd):
@@ -510,16 +501,17 @@ def patch_layouts(zin):
                 print("toolbar %s: + moved after switcher" % n)
             else:
                 die("toolbar %s: no switcher" % n)
-            # "close all tabs" button on the left: a copy of the menu button with its own icon and action
-            menu = next((nd for nd, par in els if par is not None and el_id(x, par) == ID_MBC
-                         and (x.tag(nd) or "").endswith("ImageButton")), None)
-            if menu is None:
-                die("toolbar %s: no menu button to copy" % n)
+            # "close all tabs" button on the left: same size as "+", on the switcher's rounded background;
+            # the double cross is drawn by the button itself (tb.CloseAllButton)
             tac = byid[ID_TAC][0]
-            b = x.clone_first_child(menu, tac)
-            for a in ("id", "tooltipText", "visibility"):
+            b = x.clone_first_child(btn, tac)
+            for a in ("id", "tooltipText", "visibility", "src", "layout_marginStart"):
                 x.drop(b, a)
-            x.set(b, "src", T_REFERENCE, ICON_CLOSE)
+            bg_src = byid[ID_PSC][0] if ID_PSC in byid else tac
+            bg = x.get(bg_src, "background")
+            if bg is not None:
+                x.set(b, "background", bg.dtype, bg.data)
+            x.set(b, "layout_marginStart", T_DIMENSION, DP12)
             x.set(b, "layout_gravity", T_INT_HEX, GRAVITY_START_CV)
             x.retag(b, "tb.CloseAllButton")
             x.set_str(b, "contentDescription", "Закрыть все вкладки")
@@ -688,6 +680,21 @@ SMEOF
 { echo "=== menu item handler (onOptionsItemSelected)"
   grep -rn -A14 --include='*Activity.smali' 'method.* onOptionsItemSelected(Landroid/view/MenuItem;)Z' code/smali*/org/chromium/chrome/browser | grep -v '\.line' | head -60
 } >> closeall.txt 2>&1 || true
+{ echo "=== CLOSE ALL: handler method in ChromeTabbedActivity"
+  awk -v id="$CLOSE_ID" '/^\.method/{h=$0; n=NR} index($0, "const v3, " id){print n": "h; print "branch at line " NR}' "$C"
+  L=$(grep -n "const v3, $CLOSE_ID" "$C" | head -1 | cut -d: -f1)
+  sed -n "$((L-5)),$((L+70))p" "$C" | grep -v '^\s*\.line\|^\s*$'
+  M=$(awk -v id="$CLOSE_ID" '/^\.method/{h=$0} index($0, "const v3, " id){print h; exit}' "$C" | awk '{print $NF}')
+  echo "=== callers of $M"
+  grep -rn -F "ChromeTabbedActivity;->$M" code/smali* | head -20
+  echo "=== Lwt2;->a and Lyt2"
+  for c in wt2 yt2 nlf; do f=$(ls code/smali*/$c.smali 2>/dev/null | head -1); [ -n "$f" ] && { echo ">> $f"; grep -v '^\s*\.line\|^\s*$' "$f" | head -150; }; done
+  echo "=== TOOLBAR POSITION (bottom bar vs home page)"
+  for f in $(grep -rlE 'ToolbarPosition|BottomToolbar|bottom_toolbar|ANDROID_BOTTOM|AndroidBottom' code/smali* | head -15); do
+    echo ">> $f ($(wc -l < "$f") lines)"
+    grep -n -E 'ToolbarPosition|BottomToolbar|bottom_toolbar|ANDROID_BOTTOM|AndroidBottom|\.method' "$f" | head -40
+  done
+} >> closeall.txt 2>&1 || true
 # the main code file is full (65536 limit): all new code goes into a new, extra code file
 CD=code/smali_classes$(( $(unzip -Z1 app.apk | grep -cE '^classes[0-9]*\.dex$') + 1 ))
 KEEP="$KEEP $CD"
@@ -801,6 +808,71 @@ cat > $CD/tb/CloseAllButton.smali <<SMEOF
     invoke-direct {v1}, Ltb/CloseAllItem;-><init>()V
     invoke-virtual {v0, v1}, Landroid/app/Activity;->onOptionsItemSelected(Landroid/view/MenuItem;)Z
     :done
+    return-void
+.end method
+
+# draws a double cross in the button's icon colour
+.method protected onDraw(Landroid/graphics/Canvas;)V
+    .locals 9
+    invoke-super {p0, p1}, $SUPER;->onDraw(Landroid/graphics/Canvas;)V
+    new-instance v0, Landroid/graphics/Paint;
+    const/4 v1, 0x1
+    invoke-direct {v0, v1}, Landroid/graphics/Paint;-><init>(I)V
+    invoke-virtual {p0}, Landroid/widget/ImageView;->getImageTintList()Landroid/content/res/ColorStateList;
+    move-result-object v1
+    const v2, -0x1f2f38
+    if-eqz v1, :tint_done
+    invoke-virtual {p0}, Landroid/view/View;->getDrawableState()[I
+    move-result-object v3
+    invoke-virtual {v1, v3, v2}, Landroid/content/res/ColorStateList;->getColorForState([II)I
+    move-result v2
+    :tint_done
+    invoke-virtual {v0, v2}, Landroid/graphics/Paint;->setColor(I)V
+    sget-object v1, Landroid/graphics/Paint\$Style;->STROKE:Landroid/graphics/Paint\$Style;
+    invoke-virtual {v0, v1}, Landroid/graphics/Paint;->setStyle(Landroid/graphics/Paint\$Style;)V
+    sget-object v1, Landroid/graphics/Paint\$Cap;->ROUND:Landroid/graphics/Paint\$Cap;
+    invoke-virtual {v0, v1}, Landroid/graphics/Paint;->setStrokeCap(Landroid/graphics/Paint\$Cap;)V
+    invoke-virtual {p0}, Landroid/view/View;->getResources()Landroid/content/res/Resources;
+    move-result-object v1
+    invoke-virtual {v1}, Landroid/content/res/Resources;->getDisplayMetrics()Landroid/util/DisplayMetrics;
+    move-result-object v1
+    iget v3, v1, Landroid/util/DisplayMetrics;->density:F
+    const/high16 v1, 0x40000000
+    mul-float/2addr v1, v3
+    invoke-virtual {v0, v1}, Landroid/graphics/Paint;->setStrokeWidth(F)V
+    invoke-virtual {p0}, Landroid/view/View;->getWidth()I
+    move-result v4
+    int-to-float v4, v4
+    const/high16 v1, 0x3f000000
+    mul-float/2addr v4, v1
+    invoke-virtual {p0}, Landroid/view/View;->getHeight()I
+    move-result v5
+    int-to-float v5, v5
+    mul-float/2addr v5, v1
+    const/high16 v6, 0x40800000
+    mul-float/2addr v6, v3
+    const/high16 v7, 0x40a00000
+    mul-float/2addr v7, v3
+    sub-float v8, v4, v7
+    invoke-static {p1, v0, v8, v5, v6}, Ltb/CloseAllButton;->x(Landroid/graphics/Canvas;Landroid/graphics/Paint;FFF)V
+    add-float v8, v4, v7
+    invoke-static {p1, v0, v8, v5, v6}, Ltb/CloseAllButton;->x(Landroid/graphics/Canvas;Landroid/graphics/Paint;FFF)V
+    return-void
+.end method
+
+# one cross: centre (p2, p3), half size p4
+.method private static x(Landroid/graphics/Canvas;Landroid/graphics/Paint;FFF)V
+    .locals 6
+    move-object v0, p0
+    move-object v5, p1
+    sub-float v1, p2, p4
+    sub-float v2, p3, p4
+    add-float v3, p2, p4
+    add-float v4, p3, p4
+    invoke-virtual/range {v0 .. v5}, Landroid/graphics/Canvas;->drawLine(FFFFLandroid/graphics/Paint;)V
+    add-float v2, p3, p4
+    sub-float v4, p3, p4
+    invoke-virtual/range {v0 .. v5}, Landroid/graphics/Canvas;->drawLine(FFFFLandroid/graphics/Paint;)V
     return-void
 .end method
 SMEOF
