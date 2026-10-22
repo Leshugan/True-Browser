@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       test_variants:
-        description: 'Also build test variants (plain / rename-only)'
+        description: 'Also build test variant (layout only, original package)'
         type: boolean
         default: true
 
@@ -33,36 +33,17 @@ jobs:
           NAME=$(jq -r '.assets[].name' rel.json | grep -i arm64 | grep -i '\.apk$' | head -1)
           gh release download "$TAG" -R jqssun/android-titanium-browser -p "$NAME" -O app.apk
           echo "VER=${TAG#v}" >> $GITHUB_ENV
-          echo "Original size: $(du -h app.apk | cut -f1)"
-          unzip -l app.apk | awk '{print $4, $1}' | grep -E '^lib/' | sort
+          BT=$ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)
+          echo "BT=$BT" >> $GITHUB_ENV
 
-      - name: Apktool + newest Android framework
+      - name: Read resource ids (decode only, nothing is rebuilt)
         run: |
           set -e
           curl -fsSL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar \
             || curl -fsSL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
-          SDKM=$(ls -d $ANDROID_HOME/cmdline-tools/*/bin | sort -V | tail -1)/sdkmanager
-          PLAT=$($SDKM --list 2>/dev/null | grep -oE 'platforms;android-[0-9]+(\.[0-9]+)?' | sort -u | sort -t- -k2 -V | tail -1)
-          echo "Newest platform: $PLAT"
-          yes | $SDKM "$PLAT" > /dev/null
-          JAR=$ANDROID_HOME/platforms/${PLAT#platforms;}/android.jar
-          java -jar apktool.jar if "$JAR"
-          MISSING=""
-          for a in zygotePreloadNativeLib nativeService; do
-            unzip -p "$JAR" resources.arsc | grep -aq "$a" || MISSING="$MISSING $a"
-          done
-          echo "MISSING_ATTRS=$MISSING" >> $GITHUB_ENV
-          BT=$ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)
-          echo "BT=$BT" >> $GITHUB_ENV
-
-      - name: Decode (resources only, code untouched)
-        run: |
-          set -e
           java -Xmx6g -jar apktool.jar d -s -f -o dec app.apk > decode.log 2>&1 || (tail -50 decode.log; exit 1)
-          for a in $MISSING_ATTRS; do
-            echo "Stripping unknown attribute: $a"
-            sed -i -E "s/ [a-z0-9]+:$a=\"[^\"]*\"//g" dec/AndroidManifest.xml
-          done
+          cp dec/res/values/public.xml public.xml
+          rm -rf dec
 
       - name: Signing key
         env:
@@ -79,29 +60,25 @@ jobs:
             echo "KSPASS=truebrowser" >> $GITHUB_ENV
           fi
 
-      - name: Build variants
+      - name: Build
         run: |
           set -e
           mkdir -p out
           build() {  # $1 = output name, rest = patch options
             n=$1; shift
-            rm -rf work && cp -r dec work
-            python3 scripts/patch.py work "$@"
-            java -Xmx6g -jar apktool.jar b -o u.apk work > b.log 2>&1 || (tail -80 b.log; exit 1)
-            $BT/zipalign -P 16 -f 4 u.apk a.apk
+            python3 scripts/patch_apk.py app.apk public.xml p.apk "$@" | tee patch.log
+            for f in $(grep -oE '^patched [^ ]+' patch.log | cut -d' ' -f2); do
+              echo "----- $f"; $BT/aapt2 dump xmltree --file "$f" p.apk | head -60
+            done
+            $BT/zipalign -P 16 -f 4 p.apk a.apk
             $BT/apksigner sign --ks ks.jks --ks-pass pass:$KSPASS --out "out/$n.apk" a.apk
-            rm -f u.apk a.apk
+            rm -f p.apk a.apk
             echo "$n: $(du -h out/$n.apk | cut -f1)"
           }
           build "TrueBrowser-$VER-arm64"
           if [ "${{ inputs.test_variants }}" = "true" ]; then
-            # TEST1: original file, only re-signed (no rebuild at all)
-            $BT/apksigner sign --ks ks.jks --ks-pass pass:$KSPASS --out "out/TEST1-resign-only-$VER.apk" app.apk
-            # TEST2: rebuilt without any changes, all libraries kept
-            build "TEST2-rebuild-all-libs-$VER" --no-layout --no-rename --keep-abis
+            build "TEST-layout-only-$VER" --no-rename
           fi
-          echo "Stripped attributes: [$MISSING_ATTRS]"
-          unzip -l app.apk | awk '{print $4}' | grep -E '^lib/' | cut -d/ -f2 | sort | uniq -c
           rm -f ks.jks
 
       - name: Upload True Browser
@@ -110,16 +87,9 @@ jobs:
           path: out/TrueBrowser-*.apk
           archive: false
 
-      - name: Upload test 1 (re-sign only)
+      - name: Upload test (layout only)
         if: ${{ inputs.test_variants }}
         uses: actions/upload-artifact@v7
         with:
-          path: out/TEST1-*.apk
-          archive: false
-
-      - name: Upload test 2 (rebuild, all libs)
-        if: ${{ inputs.test_variants }}
-        uses: actions/upload-artifact@v7
-        with:
-          path: out/TEST2-*.apk
+          path: out/TEST-*.apk
           archive: false
