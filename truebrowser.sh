@@ -429,7 +429,7 @@ ID_PS = res_id("id", "pane_switcher")
 GRAVITY_CENTER = 0x11
 GRAVITY_BOTTOM_CENTER = 0x51
 GRAVITY_START_CV = 0x00800013
-T_DIMENSION, DP12 = 0x05, (12 << 8) | 1
+T_DIMENSION, DP16, DP48 = 0x05, (16 << 8) | 1, (48 << 8) | 1
 ID_MBC = res_id("id", "menu_button_container")
 # extensions button on the browser toolbar: hidden (gone and zero size, so the code cannot bring it back)
 EXT_IDS = {int(m.group(2), 16): m.group(1) for m in re.finditer(
@@ -517,15 +517,11 @@ def patch_layouts(zin):
             b = x.clone_first_child(menu, tac)
             for a in ("id", "tooltipText", "visibility", "src", "layout_marginStart"):
                 x.drop(b, a)
-            for a in ("layout_width", "layout_height"):
-                v = x.get(btn, a)
-                if v is not None:
-                    x.set(b, a, v.dtype, v.data)
-            bg_src = byid[ID_PSC][0] if ID_PSC in byid else tac
-            bg = x.get(bg_src, "background")
-            if bg is not None:
-                x.set(b, "background", bg.dtype, bg.data)
-            x.set(b, "layout_marginStart", T_DIMENSION, DP12)
+            # fixed 48dp touch target; the rounded backing is drawn by the button itself
+            x.drop(b, "background")
+            x.set(b, "layout_width", T_DIMENSION, DP48)
+            x.set(b, "layout_height", T_DIMENSION, DP48)
+            x.set(b, "layout_marginStart", T_DIMENSION, DP16)
             x.set(b, "layout_gravity", T_INT_HEX, GRAVITY_START_CV)
             x.retag(b, "tb.CloseAllButton")
             x.set_str(b, "contentDescription", "Закрыть все вкладки")
@@ -956,6 +952,8 @@ cat > $CD/tb/CloseAllButton.smali <<SMEOF
     mul-float/2addr v5, v1
     mul-float/2addr v6, v1
     invoke-virtual {v4, v5, v6}, Landroid/graphics/Canvas;->translate(FF)V
+    const v1, 0x3f570a3d
+    mul-float/2addr v7, v1
     const/16 v1, 0x1c
     invoke-virtual {v0, v1}, Landroid/graphics/Paint;->setAlpha(I)V
     const v1, 0x3f000000
@@ -971,6 +969,8 @@ cat > $CD/tb/CloseAllButton.smali <<SMEOF
     invoke-virtual {v1}, Landroid/content/res/Resources;->getDisplayMetrics()Landroid/util/DisplayMetrics;
     move-result-object v1
     iget v1, v1, Landroid/util/DisplayMetrics;->density:F
+    const v2, 0x3f4ccccd
+    mul-float/2addr v1, v2
     invoke-virtual {v4, v1, v1}, Landroid/graphics/Canvas;->scale(FF)V
     const/16 v1, 0xff
     invoke-virtual {v0, v1}, Landroid/graphics/Paint;->setAlpha(I)V
