@@ -67,6 +67,11 @@ ATTR = {  # android attribute resource ids
     "layout_marginBottom": 0x010100FA,
     "rotation": 0x01010326,
     "scaleX": 0x01010324,
+    "src": 0x01010119,
+    "visibility": 0x010100DC,
+    "onClick": 0x0101026F,
+    "contentDescription": 0x01010273,
+    "tooltipText": 0x01010534,
     "layoutDirection": 0x010103B2,
     "gravity": 0x010100AF,
 }
@@ -299,6 +304,28 @@ class AXML:
             self.set(w, name, dtype, data)
         return w
 
+    def clone_first_child(self, src, parent):
+        """Copy element src (no children) and insert the copy as the first child of parent."""
+        i, _ = self.span(src)
+        s = self.nodes[i]
+        n = Node(XML_START_EL, s.line, NONE)
+        n.ns, n.name = s.ns, s.name
+        n.attrs = [Attr(a.ns, a.name, a.raw, a.dtype, a.data) for a in s.attrs]
+        e = Node(XML_END_EL, s.line, NONE)
+        e.ns, e.name = s.ns, s.name
+        k = next(k for k, x in enumerate(self.nodes) if x is parent)
+        self.nodes[k + 1:k + 1] = [n, e]
+        return n
+
+    def drop(self, nd, name):
+        rid = ATTR[name]
+        nd.attrs = [a for a in nd.attrs if self.attr_res(a) != rid]
+
+    def set_str(self, nd, name, value):
+        self.set(nd, name, T_STRING, 0)
+        a = self.get(nd, name)
+        a.data = a.raw = self.string_index(value)
+
     def move_after(self, nd, sibling):
         """Move element nd (with children) right after element sibling."""
         i, j = self.span(nd)
@@ -392,6 +419,21 @@ ID_PSC = res_id("id", "pane_switcher_card")
 ID_PS = res_id("id", "pane_switcher")
 GRAVITY_CENTER = 0x11
 GRAVITY_BOTTOM_CENTER = 0x51
+GRAVITY_START_CV = 0x00800013
+ID_MBC = res_id("id", "menu_button_container")
+
+
+def find_drawable():
+    for name in ("ic_close_all_tabs", "btn_close", "ic_close_white_24dp", "ic_close_24dp"):
+        m = re.search(r'type="drawable" name="%s" id="(0x[0-9a-f]+)"' % name, pub)
+        if m:
+            print("close-all icon:", name)
+            return int(m.group(1), 16)
+    print("close-all icon: android ic_menu_close_clear_cancel")
+    return 0x01080038
+
+
+ICON_CLOSE = find_drawable()
 
 
 def el_id(x, nd):
@@ -462,13 +504,28 @@ def patch_layouts(zin):
                 print("toolbar %s: + moved after switcher" % n)
             else:
                 die("toolbar %s: no switcher" % n)
+            # "close all tabs" button on the left: a copy of the menu button with its own icon and action
+            menu = next((nd for nd, par in els if par is not None and el_id(x, par) == ID_MBC
+                         and (x.tag(nd) or "").endswith("ImageButton")), None)
+            if menu is None:
+                die("toolbar %s: no menu button to copy" % n)
+            tac = byid[ID_TAC][0]
+            b = x.clone_first_child(menu, tac)
+            for a in ("id", "tooltipText", "visibility"):
+                x.drop(b, a)
+            x.set(b, "src", T_REFERENCE, ICON_CLOSE)
+            x.set(b, "layout_gravity", T_INT_HEX, GRAVITY_START_CV)
+            x.set_str(b, "onClick", "tbCloseAll")
+            x.set_str(b, "contentDescription", "Закрыть все вкладки")
+            print("toolbar %s: close-all button added" % n)
             found["toolbar"] += 1; mod = True
         if tag.endswith("ntp.NewTabPageLayout"):
             # home page content sits at the bottom (the code makes the page as tall as the screen)
             x.set(root, "gravity", T_INT_HEX, GRAVITY_BOTTOM_CENTER)
             ntp["bottom"] += 1; mod = True
         if any((x.tag(nd) or "").endswith("MostVisitedTilesLayout") for nd, _ in els) \
-                or tag.startswith("org.chromium.chrome.browser.suggestions.tile."):
+                or (tag.startswith("org.chromium.chrome.browser.suggestions.tile.")
+                    and "." not in tag[len("org.chromium.chrome.browser.suggestions.tile."):]):
             # home page speed dial right to left: the row is mirrored and every tile mirrored back
             # (a mirror keeps touch working; right-to-left layout direction broke the "+" tile)
             x.set(root, "scaleX", T_FLOAT, MIRROR)
@@ -543,7 +600,9 @@ cp dec/res/values/public.xml public.xml && rm -rf dec
 echo "::group::Home page code (no search box, page as tall as the screen)"
 java -Xmx8g -jar apktool.jar d -r -f -o code app.apk > code.log 2>&1 || (tail -50 code.log; exit 1)
 F=$(ls code/smali*/org/chromium/chrome/browser/ntp/NewTabPageLayout.smali)
-SD=${F%%/org/*}; DEX=${SD#code/}; DEX=${DEX/smali_/}; [ "$DEX" = smali ] && DEX=classes; DEX=$DEX.dex
+C=$(ls code/smali*/org/chromium/chrome/browser/ChromeTabbedActivity.smali)
+KEEP="${F%%/org/*} ${C%%/org/*}"
+CLOSE_ID=$(grep -oE 'type="id" name="close_all_tabs_menu_id" id="0x7f[0-9a-f]+"' public.xml | grep -oE '0x7f[0-9a-f]+')
 python3 - "$F" <<'SMEOF'
 import sys
 f = sys.argv[1]; s = open(f).read()
@@ -612,14 +671,108 @@ SMEOF
     done
   done
 } > closeall.txt 2>&1 || true
-for d in code/smali*; do [ "$d" = "$SD" ] || rm -rf "$d"; done
+# "close all tabs" button: the button calls tbCloseAll, which runs the same action as the menu item
+{ echo "=== menu item handler (onOptionsItemSelected)"
+  grep -rn -A14 'method.* onOptionsItemSelected(Landroid/view/MenuItem;)Z' code/smali*/org/chromium/chrome/browser/*Activity.smali | grep -v '\.line' | head -60
+} >> closeall.txt
+CD=${C%%/org/*}
+mkdir -p $CD/tb
+cat > $CD/tb/CloseAllItem.smali <<SMEOF
+.class public Ltb/CloseAllItem;
+.super Ljava/lang/Object;
+.implements Landroid/view/MenuItem;
+
+.method public constructor <init>()V
+    .locals 0
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method
+
+.method public getItemId()I
+    .locals 1
+    const v0, $CLOSE_ID
+    return v0
+.end method
+
+.method public getGroupId()I
+    .locals 1
+    const/4 v0, 0x0
+    return v0
+.end method
+
+.method public getOrder()I
+    .locals 1
+    const/4 v0, 0x0
+    return v0
+.end method
+
+.method public isCheckable()Z
+    .locals 1
+    const/4 v0, 0x0
+    return v0
+.end method
+
+.method public isChecked()Z
+    .locals 1
+    const/4 v0, 0x0
+    return v0
+.end method
+
+.method public isEnabled()Z
+    .locals 1
+    const/4 v0, 0x1
+    return v0
+.end method
+
+.method public isVisible()Z
+    .locals 1
+    const/4 v0, 0x1
+    return v0
+.end method
+
+.method public hasSubMenu()Z
+    .locals 1
+    const/4 v0, 0x0
+    return v0
+.end method
+
+.method public getTitle()Ljava/lang/CharSequence;
+    .locals 1
+    const/4 v0, 0x0
+    return-object v0
+.end method
+
+.method public getIntent()Landroid/content/Intent;
+    .locals 1
+    const/4 v0, 0x0
+    return-object v0
+.end method
+SMEOF
+cat >> "$C" <<'SMEOF'
+
+# True Browser: "close all tabs" button in the tab switcher (android:onClick="tbCloseAll")
+.method public tbCloseAll(Landroid/view/View;)V
+    .locals 1
+    new-instance v0, Ltb/CloseAllItem;
+    invoke-direct {v0}, Ltb/CloseAllItem;-><init>()V
+    invoke-virtual {p0, v0}, Lorg/chromium/chrome/browser/ChromeTabbedActivity;->onOptionsItemSelected(Landroid/view/MenuItem;)Z
+    return-void
+.end method
+SMEOF
+echo "close-all: id $CLOSE_ID, activity in $CD"
+for d in code/smali*; do case " $KEEP " in *" $d "*) ;; *) rm -rf "$d";; esac; done
 java -Xmx8g -jar apktool.jar b -o code.apk code > codebuild.log 2>&1 || (tail -50 codebuild.log; exit 1)
-unzip -o -q code.apk "$DEX" -d newdex
-echo "rebuilt $DEX ($(du -h newdex/$DEX | cut -f1))"
+REPL=()
+for d in $(echo $KEEP | tr ' ' '\n' | sort -u); do
+  X=${d#code/}; X=${X/smali_/}; [ "$X" = smali ] && X=classes; X=$X.dex
+  unzip -o -q code.apk "$X" -d newdex
+  REPL+=("--replace=$X=newdex/$X")
+  echo "rebuilt $X ($(du -h newdex/$X | cut -f1))"
+done
 echo "::endgroup::"
 
 echo "::group::Patch, align, sign"
-python3 tb/patch_apk.py app.apk public.xml p.apk "--replace=$DEX=newdex/$DEX" | tee patch.log
+python3 tb/patch_apk.py app.apk public.xml p.apk "${REPL[@]}" | tee patch.log
 for f in $(grep -oE '^patched [^ ]+' patch.log | cut -d' ' -f2); do
   echo "----- $f"; $BT/aapt2 dump xmltree --file "$f" p.apk | head -80
 done > xmltree.log
@@ -634,7 +787,7 @@ echo "::group::Report for Claude"
 set +eo pipefail
 R=report.txt
 echo "$TAG" > $R; cat patch.log xmltree.log >> $R
-echo "=== home page code: $F -> $DEX" >> $R
+echo "=== code: $KEEP" >> $R
 grep -n -A45 'True Browser: hide' "$F" | grep -v '\.line' >> $R
 tail -20 codebuild.log >> $R
 cat closeall.txt >> $R
