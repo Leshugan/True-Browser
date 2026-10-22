@@ -62,7 +62,8 @@ jobs:
 
       - name: Build
         run: |
-          set -e
+          set -eo pipefail
+          ls scripts/patch_apk.py scripts/axml.py
           mkdir -p out
           build() {  # $1 = output name, rest = patch options
             n=$1; shift
