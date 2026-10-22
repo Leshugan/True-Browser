@@ -29,11 +29,32 @@ jobs:
           gh release download "$TAG" -R jqssun/android-titanium-browser -p "$NAME" -O app.apk
           echo "VER=${TAG#v}" >> $GITHUB_ENV
 
+      - name: Apktool + newest Android framework
+        run: |
+          set -e
+          curl -fsSL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar \
+            || curl -fsSL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
+          SDKM=$(ls -d $ANDROID_HOME/cmdline-tools/*/bin | sort -V | tail -1)/sdkmanager
+          PLAT=$($SDKM --list 2>/dev/null | grep -oE 'platforms;android-[0-9]+(\.[0-9]+)?' | sort -u | sort -t- -k2 -V | tail -1)
+          echo "Newest platform: $PLAT"
+          yes | $SDKM "$PLAT" > /dev/null
+          JAR=$ANDROID_HOME/platforms/${PLAT#platforms;}/android.jar
+          java -jar apktool.jar if "$JAR"
+          # attributes the framework still doesn't know -> stripped from the manifest later
+          MISSING=""
+          for a in zygotePreloadNativeLib nativeService; do
+            unzip -p "$JAR" resources.arsc | grep -aq "$a" || MISSING="$MISSING $a"
+          done
+          echo "MISSING_ATTRS=$MISSING" >> $GITHUB_ENV
+
       - name: Decode (resources only, code untouched)
         run: |
           set -e
-          curl -sSL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
           java -Xmx6g -jar apktool.jar d -s -f -o dec app.apk > decode.log 2>&1 || (tail -50 decode.log; exit 1)
+          for a in $MISSING_ATTRS; do
+            echo "Stripping unknown attribute: $a"
+            sed -i -E "s/ [a-z0-9]+:$a=\"[^\"]*\"//g" dec/AndroidManifest.xml
+          done
 
       - name: Patch
         run: python3 scripts/patch.py dec
