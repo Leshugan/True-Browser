@@ -1,0 +1,74 @@
+name: Explore Titanium
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  explore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download latest Titanium (arm64)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          gh release view -R jqssun/android-titanium-browser --json tagName,assets > rel.json
+          TAG=$(jq -r .tagName rel.json)
+          NAME=$(jq -r '.assets[].name' rel.json | grep -i arm64 | grep -i '\.apk$' | head -1)
+          echo "TAG=$TAG NAME=$NAME"
+          gh release download "$TAG" -R jqssun/android-titanium-browser -p "$NAME" -O app.apk
+          echo "$TAG $NAME" > info.txt
+          ls -la app.apk
+
+      - name: Decode
+        run: |
+          set -e
+          curl -sSL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
+          java -Xmx6g -jar apktool.jar d -f -o dec app.apk > decode.log 2>&1 || (tail -50 decode.log; exit 1)
+          tail -5 decode.log
+
+      - name: Report
+        run: |
+          R=report.txt
+          {
+            echo "=== INFO"; cat info.txt
+            echo "=== MANIFEST (head)"; head -c 3000 dec/AndroidManifest.xml; echo
+            echo "=== DIRS"; ls dec; ls dec | grep -c smali
+            echo "=== LAYOUTS (tab/hub)"
+            ls dec/res/layout/ | grep -iE 'hub|tab_switcher|tab_grid|tab_list|tab_group|pane|incognito_toggle|new_tab' | sort
+          } > $R
+          for f in $(ls dec/res/layout/ | grep -iE '^hub|tab_switcher_pane|tab_list_recycler|tab_list_editor|tab_grid|pane_' | sort | head -40); do
+            echo "=== FILE res/layout/$f" >> $R
+            head -c 6000 "dec/res/layout/$f" >> $R; echo >> $R
+          done
+          echo "=== PUBLIC IDS" >> $R
+          grep -E 'name="(hub_[a-z_]*|pane_[a-z_]*|tab_list_recycler_view|tab_switcher[a-z_]*|toolbar_action_button|menu_button|pane_switcher|search_box|incognito_toggle_tabs)"' dec/res/values/public.xml > ids.txt || true
+          cat ids.txt >> $R
+          echo "=== SMALI USING IDS" >> $R
+          grep -oE 'name="[a-z_]+" id="0x[0-9a-f]+"' ids.txt | while read -r l; do
+            n=$(echo "$l" | sed -E 's/name="([a-z_]+)".*/\1/'); h=$(echo "$l" | sed -E 's/.*id="(0x[0-9a-f]+)".*/\1/')
+            echo "--- $n $h" >> $R
+            grep -rl --include=*.smali "$h" dec/smali* 2>/dev/null | head -6 >> $R
+          done
+          echo "=== SMALI STRINGS" >> $R
+          for s in 'TabSwitcher' 'GridTabSwitcher' 'Hub' 'TabListRecycler' 'setReverseLayout' 'setStackFromEnd'; do
+            echo "--- $s" >> $R
+            grep -rl --include=*.smali "$s" dec/smali* 2>/dev/null | head -10 >> $R
+          done
+          wc -c $R
+
+      - name: Upload report
+        uses: actions/upload-artifact@v7
+        with:
+          name: report
+          path: report.txt
+          archive: false
