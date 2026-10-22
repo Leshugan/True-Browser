@@ -318,6 +318,11 @@ class AXML:
         self.nodes[k + 1:k + 1] = [n, e]
         return n
 
+    def retag(self, nd, tag):
+        _, j = self.span(nd)
+        nd.ns = self.nodes[j].ns = NONE
+        nd.name = self.nodes[j].name = self.string_index(tag)
+
     def drop(self, nd, name):
         rid = ATTR[name]
         nd.attrs = [a for a in nd.attrs if self.attr_res(a) != rid]
@@ -516,7 +521,7 @@ def patch_layouts(zin):
                 x.drop(b, a)
             x.set(b, "src", T_REFERENCE, ICON_CLOSE)
             x.set(b, "layout_gravity", T_INT_HEX, GRAVITY_START_CV)
-            x.set_str(b, "onClick", "tbCloseAll")
+            x.retag(b, "tb.CloseAllButton")
             x.set_str(b, "contentDescription", "Закрыть все вкладки")
             print("toolbar %s: close-all button added" % n)
             found["toolbar"] += 1; mod = True
@@ -609,7 +614,7 @@ echo "::group::Home page code (no search box, page as tall as the screen)"
 java -Xmx8g -jar apktool.jar d -r -f -o code app.apk > code.log 2>&1 || (tail -50 code.log; exit 1)
 F=$(ls code/smali*/org/chromium/chrome/browser/ntp/NewTabPageLayout.smali)
 C=$(ls code/smali*/org/chromium/chrome/browser/ChromeTabbedActivity.smali)
-KEEP="${F%%/org/*} ${C%%/org/*}"
+KEEP="${F%%/org/*}"
 CLOSE_ID=$(grep -oE 'type="id" name="close_all_tabs_menu_id" id="0x7f[0-9a-f]+"' public.xml | grep -oE '0x7f[0-9a-f]+')
 python3 - "$F" <<'SMEOF'
 import sys
@@ -679,11 +684,11 @@ SMEOF
     done
   done
 } > closeall.txt 2>&1 || true
-# "close all tabs" button: the button calls tbCloseAll, which runs the same action as the menu item
+# "close all tabs" button: runs the same action as the menu item
 { echo "=== menu item handler (onOptionsItemSelected)"
   grep -rn -A14 --include='*Activity.smali' 'method.* onOptionsItemSelected(Landroid/view/MenuItem;)Z' code/smali*/org/chromium/chrome/browser | grep -v '\.line' | head -60
 } >> closeall.txt 2>&1 || true
-# the main code file is full (65536 limit), so the helper goes into a new, extra code file
+# the main code file is full (65536 limit): all new code goes into a new, extra code file
 CD=code/smali_classes$(( $(unzip -Z1 app.apk | grep -cE '^classes[0-9]*\.dex$') + 1 ))
 KEEP="$KEEP $CD"
 mkdir -p $CD/tb
@@ -758,18 +763,48 @@ cat > $CD/tb/CloseAllItem.smali <<SMEOF
     return-object v0
 .end method
 SMEOF
-cat >> "$C" <<'SMEOF'
+# the button is its own small class (in the extra code file): it finds the activity and runs the menu action
+SUPER=Landroid/widget/ImageButton
+CIB=$(ls code/smali*/org/chromium/ui/widget/ChromeImageButton.smali 2>/dev/null | head -1)
+if [ -n "$CIB" ] && ! grep -q '^\.class.* final ' "$CIB" \
+   && grep -q 'constructor <init>(Landroid/content/Context;Landroid/util/AttributeSet;)V' "$CIB"; then
+  SUPER=Lorg/chromium/ui/widget/ChromeImageButton
+fi
+cat > $CD/tb/CloseAllButton.smali <<SMEOF
+.class public Ltb/CloseAllButton;
+.super $SUPER;
+.implements Landroid/view/View\$OnClickListener;
 
-# True Browser: "close all tabs" button in the tab switcher (android:onClick="tbCloseAll")
-.method public tbCloseAll(Landroid/view/View;)V
-    .locals 1
-    new-instance v0, Ltb/CloseAllItem;
-    invoke-direct {v0}, Ltb/CloseAllItem;-><init>()V
-    invoke-virtual {p0, v0}, Landroid/app/Activity;->onOptionsItemSelected(Landroid/view/MenuItem;)Z
+.method public constructor <init>(Landroid/content/Context;Landroid/util/AttributeSet;)V
+    .locals 0
+    invoke-direct {p0, p1, p2}, $SUPER;-><init>(Landroid/content/Context;Landroid/util/AttributeSet;)V
+    invoke-virtual {p0, p0}, Landroid/view/View;->setOnClickListener(Landroid/view/View\$OnClickListener;)V
+    return-void
+.end method
+
+.method public onClick(Landroid/view/View;)V
+    .locals 2
+    invoke-virtual {p0}, Landroid/view/View;->getContext()Landroid/content/Context;
+    move-result-object v0
+    :walk
+    instance-of v1, v0, Landroid/app/Activity;
+    if-nez v1, :found
+    instance-of v1, v0, Landroid/content/ContextWrapper;
+    if-eqz v1, :done
+    check-cast v0, Landroid/content/ContextWrapper;
+    invoke-virtual {v0}, Landroid/content/ContextWrapper;->getBaseContext()Landroid/content/Context;
+    move-result-object v0
+    goto :walk
+    :found
+    check-cast v0, Landroid/app/Activity;
+    new-instance v1, Ltb/CloseAllItem;
+    invoke-direct {v1}, Ltb/CloseAllItem;-><init>()V
+    invoke-virtual {v0, v1}, Landroid/app/Activity;->onOptionsItemSelected(Landroid/view/MenuItem;)Z
+    :done
     return-void
 .end method
 SMEOF
-echo "close-all: id $CLOSE_ID, activity in $CD"
+echo "close-all: id $CLOSE_ID, button based on $SUPER, code in $CD"
 for d in code/smali*; do case " $KEEP " in *" $d "*) ;; *) rm -rf "$d";; esac; done
 java -Xmx8g -jar apktool.jar b -o code.apk code > codebuild.log 2>&1 || (tail -50 codebuild.log; exit 1)
 REPL=()
