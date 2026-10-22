@@ -433,7 +433,7 @@ T_DIMENSION, DP16, DP48 = 0x05, (16 << 8) | 1, (48 << 8) | 1
 ID_MBC = res_id("id", "menu_button_container")
 # extensions button on the browser toolbar: hidden (gone and zero size, so the code cannot bring it back)
 EXT_IDS = {int(m.group(2), 16): m.group(1) for m in re.finditer(
-    r'type="id" name="([^"]*extension[^"]*button[^"]*)" id="(0x[0-9a-f]+)"', pub)}
+    r'type="id" name="(extensions_menu_button)" id="(0x[0-9a-f]+)"', pub)}
 print("extensions button ids:", sorted(EXT_IDS.values()))
 
 
@@ -996,6 +996,29 @@ cat > $CD/tb/CloseAllButton.smali <<SMEOF
 .end method
 SMEOF
 echo "close-all: id $CLOSE_ID, button based on $SUPER, code in $CD"
+# address bar visible on the home page: the page says "search provider has a logo" -> false,
+# so the browser stops treating the (removed) search box on the page as the address bar
+NTPF=$(grep -rl '^\.field .* G:Ld3a;' code/smali* | head -1)
+NTPC=$(basename "$NTPF" .smali)
+python3 - "$NTPC" code <<'NTEOF'
+import os, re, sys
+cls, root = sys.argv[1], sys.argv[2]
+pat = re.compile(r"^(\s*)iput-boolean (v\d+|p\d+), (\S+), L%s;->(K|L):Z$" % re.escape(cls), re.M)
+n = 0; dirs = set()
+for d, _, fs in os.walk(root):
+    for f in fs:
+        if not f.endswith(".smali"): continue
+        path = os.path.join(d, f); s = open(path).read()
+        if ("L%s;->" % cls) not in s: continue
+        s2, k = pat.subn(lambda m: "%s# True Browser: no logo -> address bar shown on the home page\n%sconst/4 %s, 0x0\n%s" % (m.group(1), m.group(1), m.group(2), m.group(0)), s)
+        if k:
+            open(path, "w").write(s2); n += k
+            dirs.add(path.split(os.sep)[1])
+print("home page logo flags forced off:", n, "in", sorted(dirs))
+open("ntp_dirs.txt", "w").write(" ".join("code/" + x for x in sorted(dirs)))
+assert n > 0, "home page logo flags not found"
+NTEOF
+KEEP="$KEEP $(cat ntp_dirs.txt)"
 # bottom address bar also on the home page: the position decision ignores "home page is showing"
 TP=$(grep -rl 'cr_ToolbarPosition' code/smali* | head -1)
 python3 - "$TP" <<'TPEOF'
