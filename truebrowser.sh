@@ -501,12 +501,20 @@ def patch_layouts(zin):
                 print("toolbar %s: + moved after switcher" % n)
             else:
                 die("toolbar %s: no switcher" % n)
-            # "close all tabs" button on the left: same size as "+", on the switcher's rounded background;
-            # the double cross is drawn by the button itself (tb.CloseAllButton)
+            # "close all tabs" button on the left: a copy of the menu button, sized like "+",
+            # on the switcher's rounded background; the double cross is drawn by tb.CloseAllButton
+            menu = next((nd for nd, par in els if par is not None and el_id(x, par) == ID_MBC
+                         and (x.tag(nd) or "").endswith("ImageButton")), None)
+            if menu is None:
+                die("toolbar %s: no menu button to copy" % n)
             tac = byid[ID_TAC][0]
-            b = x.clone_first_child(btn, tac)
+            b = x.clone_first_child(menu, tac)
             for a in ("id", "tooltipText", "visibility", "src", "layout_marginStart"):
                 x.drop(b, a)
+            for a in ("layout_width", "layout_height"):
+                v = x.get(btn, a)
+                if v is not None:
+                    x.set(b, a, v.dtype, v.data)
             bg_src = byid[ID_PSC][0] if ID_PSC in byid else tac
             bg = x.get(bg_src, "background")
             if bg is not None:
@@ -523,7 +531,7 @@ def patch_layouts(zin):
             ntp["bottom"] += 1; mod = True
         if any((x.tag(nd) or "").endswith("MostVisitedTilesLayout") for nd, _ in els) \
                 or (tag.startswith("org.chromium.chrome.browser.suggestions.tile.")
-                    and "." not in tag[len("org.chromium.chrome.browser.suggestions.tile."):]):
+                    and ".tile_edit_dialog." not in tag):
             # home page speed dial right to left: the row is mirrored and every tile mirrored back
             # (a mirror keeps touch working; right-to-left layout direction broke the "+" tile)
             x.set(root, "scaleX", T_FLOAT, MIRROR)
@@ -689,6 +697,14 @@ SMEOF
   grep -rn -F "ChromeTabbedActivity;->$M" code/smali* | head -20
   echo "=== Lwt2;->a and Lyt2"
   for c in wt2 yt2 nlf; do f=$(ls code/smali*/$c.smali 2>/dev/null | head -1); [ -n "$f" ] && { echo ">> $f"; grep -v '^\s*\.line\|^\s*$' "$f" | head -150; }; done
+  echo "=== TOOLBAR POSITION: decision method and its callers"
+  TP=$(grep -rl 'cr_ToolbarPosition' code/smali* | head -1)
+  if [ -n "$TP" ]; then
+    echo ">> $TP"
+    awk '/^\.method public static a\(ZZZZZZZZI\)I/{f=1} f{print} f&&/^\.end method/{exit}' "$TP" | grep -v '^\s*\.line\|^\s*$'
+    K=$(basename "$TP" .smali)
+    grep -rn -B30 "L$K;->a(ZZZZZZZZI)I" code/smali* | grep -v '\.line\|^\S*-\s*$' | head -120
+  fi
   echo "=== TOOLBAR POSITION (bottom bar vs home page)"
   for f in $(grep -rlE 'ToolbarPosition|BottomToolbar|bottom_toolbar|ANDROID_BOTTOM|AndroidBottom' code/smali* | head -15); do
     echo ">> $f ($(wc -l < "$f") lines)"
@@ -770,6 +786,74 @@ cat > $CD/tb/CloseAllItem.smali <<SMEOF
     return-object v0
 .end method
 SMEOF
+# the menu action handler of the activity, e.g. R2(IZLandroid/os/Bundle;Lpo9;)Z
+ACTION=$(awk -v id="$CLOSE_ID" '/^\.method/{h=$0} index($0, "const v3, " id){print h; exit}' "$C" | awk '{print $NF}')
+case "$ACTION" in *"(IZLandroid/os/Bundle;"*")Z") ;; *) echo "close-all: unexpected handler '$ACTION'"; exit 1;; esac
+echo "close-all: handler $ACTION"
+# crash catcher: on a crash the error text goes to the clipboard (paste it to Claude)
+cat > $CD/tb/Crash.smali <<'SMEOF'
+.class public Ltb/Crash;
+.super Ljava/lang/Object;
+.implements Ljava/lang/Thread$UncaughtExceptionHandler;
+
+.field private final prev:Ljava/lang/Thread$UncaughtExceptionHandler;
+
+.method public constructor <init>(Ljava/lang/Thread$UncaughtExceptionHandler;)V
+    .locals 0
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    iput-object p1, p0, Ltb/Crash;->prev:Ljava/lang/Thread$UncaughtExceptionHandler;
+    return-void
+.end method
+
+.method public static install()V
+    .locals 2
+    invoke-static {}, Ljava/lang/Thread;->getDefaultUncaughtExceptionHandler()Ljava/lang/Thread$UncaughtExceptionHandler;
+    move-result-object v0
+    instance-of v1, v0, Ltb/Crash;
+    if-nez v1, :done
+    new-instance v1, Ltb/Crash;
+    invoke-direct {v1, v0}, Ltb/Crash;-><init>(Ljava/lang/Thread$UncaughtExceptionHandler;)V
+    invoke-static {v1}, Ljava/lang/Thread;->setDefaultUncaughtExceptionHandler(Ljava/lang/Thread$UncaughtExceptionHandler;)V
+    :done
+    return-void
+.end method
+
+.method public uncaughtException(Ljava/lang/Thread;Ljava/lang/Throwable;)V
+    .locals 4
+    :try_start
+    const-string v0, "android.app.ActivityThread"
+    invoke-static {v0}, Ljava/lang/Class;->forName(Ljava/lang/String;)Ljava/lang/Class;
+    move-result-object v0
+    const-string v1, "currentApplication"
+    const/4 v2, 0x0
+    new-array v3, v2, [Ljava/lang/Class;
+    invoke-virtual {v0, v1, v3}, Ljava/lang/Class;->getMethod(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;
+    move-result-object v0
+    const/4 v1, 0x0
+    new-array v3, v2, [Ljava/lang/Object;
+    invoke-virtual {v0, v1, v3}, Ljava/lang/reflect/Method;->invoke(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;
+    move-result-object v0
+    check-cast v0, Landroid/content/Context;
+    const-string v1, "clipboard"
+    invoke-virtual {v0, v1}, Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;
+    move-result-object v0
+    check-cast v0, Landroid/content/ClipboardManager;
+    invoke-static {p2}, Landroid/util/Log;->getStackTraceString(Ljava/lang/Throwable;)Ljava/lang/String;
+    move-result-object v1
+    const-string v3, "True Browser crash"
+    invoke-static {v3, v1}, Landroid/content/ClipData;->newPlainText(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;
+    move-result-object v1
+    invoke-virtual {v0, v1}, Landroid/content/ClipboardManager;->setPrimaryClip(Landroid/content/ClipData;)V
+    :try_end
+    .catch Ljava/lang/Throwable; {:try_start .. :try_end} :after
+    :after
+    iget-object v0, p0, Ltb/Crash;->prev:Ljava/lang/Thread$UncaughtExceptionHandler;
+    if-eqz v0, :end
+    invoke-interface {v0, p1, p2}, Ljava/lang/Thread$UncaughtExceptionHandler;->uncaughtException(Ljava/lang/Thread;Ljava/lang/Throwable;)V
+    :end
+    return-void
+.end method
+SMEOF
 # the button is its own small class (in the extra code file): it finds the activity and runs the menu action
 SUPER=Landroid/widget/ImageButton
 CIB=$(ls code/smali*/org/chromium/ui/widget/ChromeImageButton.smali 2>/dev/null | head -1)
@@ -790,7 +874,8 @@ cat > $CD/tb/CloseAllButton.smali <<SMEOF
 .end method
 
 .method public onClick(Landroid/view/View;)V
-    .locals 2
+    .locals 4
+    :click_try
     invoke-virtual {p0}, Landroid/view/View;->getContext()Landroid/content/Context;
     move-result-object v0
     :walk
@@ -803,11 +888,24 @@ cat > $CD/tb/CloseAllButton.smali <<SMEOF
     move-result-object v0
     goto :walk
     :found
-    check-cast v0, Landroid/app/Activity;
-    new-instance v1, Ltb/CloseAllItem;
-    invoke-direct {v1}, Ltb/CloseAllItem;-><init>()V
-    invoke-virtual {v0, v1}, Landroid/app/Activity;->onOptionsItemSelected(Landroid/view/MenuItem;)Z
+    instance-of v1, v0, Lorg/chromium/chrome/browser/ChromeTabbedActivity;
+    if-eqz v1, :done
+    check-cast v0, Lorg/chromium/chrome/browser/ChromeTabbedActivity;
+    const v1, $CLOSE_ID
+    const/4 v2, 0x1
+    const/4 v3, 0x0
+    invoke-virtual {v0, v1, v2, v3, v3}, Lorg/chromium/chrome/browser/ChromeTabbedActivity;->$ACTION
     :done
+    :click_end
+    .catch Ljava/lang/Throwable; {:click_try .. :click_end} :click_fail
+    return-void
+    :click_fail
+    return-void
+.end method
+
+.method static constructor <clinit>()V
+    .locals 0
+    invoke-static {}, Ltb/Crash;->install()V
     return-void
 .end method
 
@@ -815,6 +913,7 @@ cat > $CD/tb/CloseAllButton.smali <<SMEOF
 .method protected onDraw(Landroid/graphics/Canvas;)V
     .locals 9
     invoke-super {p0, p1}, $SUPER;->onDraw(Landroid/graphics/Canvas;)V
+    :draw_try
     new-instance v0, Landroid/graphics/Paint;
     const/4 v1, 0x1
     invoke-direct {v0, v1}, Landroid/graphics/Paint;-><init>(I)V
@@ -857,6 +956,10 @@ cat > $CD/tb/CloseAllButton.smali <<SMEOF
     invoke-static {p1, v0, v8, v5, v6}, Ltb/CloseAllButton;->x(Landroid/graphics/Canvas;Landroid/graphics/Paint;FFF)V
     add-float v8, v4, v7
     invoke-static {p1, v0, v8, v5, v6}, Ltb/CloseAllButton;->x(Landroid/graphics/Canvas;Landroid/graphics/Paint;FFF)V
+    :draw_end
+    .catch Ljava/lang/Throwable; {:draw_try .. :draw_end} :draw_fail
+    return-void
+    :draw_fail
     return-void
 .end method
 
