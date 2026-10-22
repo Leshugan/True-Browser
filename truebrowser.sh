@@ -847,7 +847,7 @@ cat > $CD/tb/Crash.smali <<'SMEOF'
 SMEOF
 # the button is its own small class (in the extra code file): it finds the activity and runs the menu action
 SUPER=Landroid/widget/ImageButton
-CIB=$(ls code/smali*/org/chromium/ui/widget/ChromeImageButton.smali 2>/dev/null | head -1)
+CIB=$(ls code/smali*/org/chromium/ui/widget/ChromeImageButton.smali 2>/dev/null | head -1 || true)
 if [ -n "$CIB" ] && ! grep -q '^\.class.* final ' "$CIB" \
    && grep -q 'constructor <init>(Landroid/content/Context;Landroid/util/AttributeSet;)V' "$CIB"; then
   SUPER=Lorg/chromium/ui/widget/ChromeImageButton
@@ -1031,7 +1031,7 @@ export TB_STATUS_TAG
 echo "status icon class: '$TB_STATUS_TAG'"
 if [ -n "$TB_STATUS_TAG" ]; then
   case "$TB_STATUS_TAG" in *.*) RSUP=L$(echo "$TB_STATUS_TAG" | tr . /);; *) RSUP=Landroid/widget/$TB_STATUS_TAG;; esac
-  RF=$(ls code/smali*/${RSUP#L}.smali 2>/dev/null | head -1)
+  RF=$(ls code/smali*/${RSUP#L}.smali 2>/dev/null | head -1 || true)
   if [ -n "$RF" ] && grep -q '^\.class.* final ' "$RF"; then echo "status icon class is final, not changed"; TB_STATUS_TAG=""; export TB_STATUS_TAG; fi
 fi
 if [ -n "$TB_STATUS_TAG" ]; then
