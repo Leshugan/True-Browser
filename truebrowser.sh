@@ -1198,5 +1198,63 @@ grep -n -A45 'True Browser: hide' "$F" | grep -v '\.line' >> $R
 tail -20 codebuild.log >> $R
 cat closeall.txt >> $R
 cat ntp_iface.txt >> $R
+# data for "install extension from CRX" (read by Claude)
+pip install -q brotli > /dev/null 2>&1
+python3 - app.apk >> $R 2>&1 <<'CRXEOF'
+import gzip, io, json, re, struct, sys, zipfile
+z = zipfile.ZipFile(sys.argv[1])
+names = z.namelist()
+print("=== CRX: apk files (assets, paks)")
+for n in names:
+    if n.startswith("assets/") or n.endswith(".pak"):
+        print(" ", n, z.getinfo(n).file_size)
+print("=== CRX: built-in extensions (manifest.json in the apk)")
+for n in names:
+    if n.endswith("manifest.json"):
+        base = n[: -len("manifest.json")]
+        print("##", n)
+        try: print(z.read(n).decode("utf-8", "replace")[:3000])
+        except Exception as e: print(e)
+        for m in names:
+            if m.startswith(base) and m != n:
+                print("   file:", m, z.getinfo(m).file_size)
+                if re.search(r"\.(js|html)$", m) and z.getinfo(m).file_size < 60000:
+                    t = z.read(m).decode("utf-8", "replace")
+                    if re.search(r"crx|zip|install|developerPrivate|management|downloads", t, re.I):
+                        print("----- " + m); print(t[:20000])
+def unpak(data):
+    ver = struct.unpack_from("<I", data, 0)[0]
+    if ver == 5:
+        _, enc, n, na = struct.unpack_from("<IIHH", data, 0); off = 12
+    else:
+        n, enc = struct.unpack_from("<IB", data, 4); na = 0; off = 9
+    ents = [struct.unpack_from("<HI", data, off + 6 * i) for i in range(n + 1)]
+    for i in range(n):
+        rid, s = ents[i]; e = ents[i + 1][1]; b = data[s:e]
+        kind = "raw"
+        try:
+            if b[:2] == b"\x1e\x9b":
+                import brotli; b = brotli.decompress(b[8:]); kind = "br"
+            elif b[:2] == b"\x1f\x8b":
+                b = gzip.decompress(b); kind = "gz"
+        except Exception as ex:
+            kind = "err"
+        yield rid, kind, b
+print("=== CRX: chrome://extensions page resources")
+for n in names:
+    if not n.endswith(".pak"): continue
+    try: data = z.read(n)
+    except Exception: continue
+    try:
+        for rid, kind, b in unpak(data):
+            if b"extensions-manager" in b or b"loadUnpacked" in b or b"installDroppedFile" in b:
+                t = b.decode("utf-8", "replace")
+                hits = [m.start() for m in re.finditer(r"loadUnpacked|installDroppedFile|load-unpacked|dev-mode|pack-extensions", t)]
+                print("## %s id=%d %s len=%d hits=%d" % (n, rid, kind, len(b), len(hits)))
+                for h in hits[:6]:
+                    print("   ...", t[max(0, h - 300):h + 300].replace("\n", " "))
+    except Exception as e:
+        print("pak", n, "error", e)
+CRXEOF
 wc -c $R
 echo "::endgroup::"
