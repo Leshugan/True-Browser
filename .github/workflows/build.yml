@@ -313,6 +313,19 @@ jobs:
                   p = next(k for k, n in enumerate(self.nodes) if n is parent)
                   self.nodes[p + 1:p + 1] = block
 
+              def wrap(self, nd, tag, attrs):
+                  """Put element nd inside a new element <tag attrs...>; returns the new element."""
+                  i, j = self.span(nd)
+                  w = Node(XML_START_EL, self.nodes[i].line, NONE)
+                  w.ns, w.name = NONE, self.string_index(tag)
+                  e = Node(XML_END_EL, self.nodes[i].line, NONE)
+                  e.ns, e.name = NONE, w.name
+                  self.nodes.insert(j + 1, e)
+                  self.nodes.insert(i, w)
+                  for name, dtype, data in attrs:
+                      self.set(w, name, dtype, data)
+                  return w
+
               def move_after(self, nd, sibling):
                   """Move element nd (with children) right after element sibling."""
                   i, j = self.span(nd)
@@ -413,7 +426,7 @@ jobs:
           def patch_layouts(zin):
               changed = {}
               found = {"recycler": 0, "card": 0, "hub": 0}
-              if "--toolbar" in OPTS:
+              if "--no-toolbar" not in OPTS:
                   found["toolbar"] = 0
               for info in zin.infolist():
                   n = info.filename
@@ -453,7 +466,7 @@ jobs:
                       if c != 1 or i != 1:
                           die("hub layout %s: container=%d toolbar include=%d" % (n, c, i))
                       found["hub"] += 1; mod = True
-                  if "--toolbar" in OPTS and any(el_id(x, nd) == ID_TAC for nd, _ in els):
+                  if "--no-toolbar" not in OPTS and any(el_id(x, nd) == ID_TAC for nd, _ in els):
                       # tab switcher toolbar: put "+" right after the tabs/groups switcher
                       byid = {el_id(x, nd): (nd, par) for nd, par in els if el_id(x, nd) is not None}
                       if ID_TAB not in byid:
@@ -461,9 +474,12 @@ jobs:
                       btn, btn_parent = byid[ID_TAB]
                       if ID_PSC in byid:  # switcher in a card: card goes first into the "+" row, row centered
                           card = byid[ID_PSC][0]
-                          x.move_after_start(card, btn_parent)
+                          # the code casts the card's layout params to FrameLayout ones: keep a FrameLayout parent
+                          holder = x.wrap(card, "FrameLayout", [("layout_width", T_INT_DEC, WRAP_CONTENT),
+                                                                ("layout_height", T_INT_DEC, MATCH_PARENT)])
+                          x.move_after_start(holder, btn_parent)
                           x.set(btn_parent, "layout_gravity", T_INT_HEX, GRAVITY_CENTER)
-                          print("toolbar %s: card moved before +" % n)
+                          print("toolbar %s: card (in its own frame) moved before +" % n)
                       elif ID_PS in byid:  # plain switcher in one row: "+" goes after it
                           x.move_after(btn, byid[ID_PS][0])
                           print("toolbar %s: + moved after switcher" % n)
