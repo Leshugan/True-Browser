@@ -389,7 +389,7 @@ entry (code, native libs, resources.arsc) is copied byte-for-byte.
   2. Tab switcher toolbar moved to the bottom.
   3. Package renamed to leshugan.truebrowser.
 """
-import re, struct, sys, zipfile
+import os, re, struct, sys, zipfile
 from axml import AXML, T_FLOAT, T_INT_DEC, T_INT_HEX, T_REFERENCE, T_STRING, NONE
 
 SRC, PUBLIC, DST = sys.argv[1:4]
@@ -431,6 +431,9 @@ GRAVITY_BOTTOM_CENTER = 0x51
 GRAVITY_START_CV = 0x00800013
 T_DIMENSION, DP16, DP48 = 0x05, (16 << 8) | 1, (48 << 8) | 1
 ID_MBC = res_id("id", "menu_button_container")
+_m = re.search(r'type="id" name="location_bar_status_icon" id="(0x[0-9a-f]+)"', pub)
+ID_STATUS = int(_m.group(1), 16) if _m else None
+STATUS_FROM = os.environ.get("TB_STATUS_TAG", "")
 # extensions button on the browser toolbar: hidden (gone and zero size, so the code cannot bring it back)
 EXT_IDS = {int(m.group(2), 16): m.group(1) for m in re.finditer(
     r'type="id" name="(extensions_menu_button)" id="(0x[0-9a-f]+)"', pub)}
@@ -537,6 +540,11 @@ def patch_layouts(zin):
                 x.set(nd, "layout_width", T_DIMENSION, 0)
                 x.set(nd, "layout_height", T_DIMENSION, 0)
                 found_ext.append("%s in %s" % (EXT_IDS[el_id(x, nd)], n)); mod = True
+        for nd, _ in els:
+            if ID_STATUS is not None and STATUS_FROM and el_id(x, nd) == ID_STATUS and x.tag(nd) == STATUS_FROM:
+                # address bar icon: drawn round when it shows a site / search engine picture
+                x.retag(nd, "tb.RoundIcon")
+                print("status icon made round in %s" % n); mod = True
         tiles_row = next((nd for nd, _ in els if (x.tag(nd) or "").endswith("MostVisitedTilesLayout")), None)
         if tiles_row is not None:
             # home page speed dial right to left: the row fills the width and lays tiles out from the right
@@ -996,6 +1004,102 @@ cat > $CD/tb/CloseAllButton.smali <<SMEOF
 .end method
 SMEOF
 echo "close-all: id $CLOSE_ID, button based on $SUPER, code in $CD"
+# address bar icon: the search engine / site picture is drawn inside a circle
+TB_STATUS_TAG=$(python3 - <<'STEOF'
+import re, sys, zipfile
+sys.path.insert(0, "tb")
+from axml import AXML
+pub = open("public.xml", encoding="utf-8").read()
+m = re.search(r'type="id" name="location_bar_status_icon" id="(0x[0-9a-f]+)"', pub)
+tags = set()
+if m:
+    rid = int(m.group(1), 16)
+    z = zipfile.ZipFile("app.apk")
+    for n in z.namelist():
+        if not (n.startswith("res/") and n.endswith(".xml")): continue
+        d = z.read(n)
+        if d[:2] != b"\x03\x00": continue
+        try: x = AXML(d)
+        except Exception: continue
+        for nd, _ in x.elements():
+            a = x.get(nd, "id")
+            if a is not None and a.data == rid: tags.add(x.tag(nd))
+print(tags.pop() if len(tags) == 1 else "")
+STEOF
+)
+export TB_STATUS_TAG
+echo "status icon class: '$TB_STATUS_TAG'"
+if [ -n "$TB_STATUS_TAG" ]; then
+  case "$TB_STATUS_TAG" in *.*) RSUP=L$(echo "$TB_STATUS_TAG" | tr . /);; *) RSUP=Landroid/widget/$TB_STATUS_TAG;; esac
+  RF=$(ls code/smali*/${RSUP#L}.smali 2>/dev/null | head -1)
+  if [ -n "$RF" ] && grep -q '^\.class.* final ' "$RF"; then echo "status icon class is final, not changed"; TB_STATUS_TAG=""; export TB_STATUS_TAG; fi
+fi
+if [ -n "$TB_STATUS_TAG" ]; then
+  cat > $CD/tb/RoundIcon.smali <<SMEOF
+.class public Ltb/RoundIcon;
+.super $RSUP;
+
+.method public constructor <init>(Landroid/content/Context;Landroid/util/AttributeSet;)V
+    .locals 0
+    invoke-direct {p0, p1, p2}, $RSUP;-><init>(Landroid/content/Context;Landroid/util/AttributeSet;)V
+    return-void
+.end method
+
+# pictures (search engine logo, site icon) are clipped to a circle; vector icons are drawn as they are
+.method protected onDraw(Landroid/graphics/Canvas;)V
+    .locals 8
+    invoke-virtual {p0}, Landroid/widget/ImageView;->getDrawable()Landroid/graphics/drawable/Drawable;
+    move-result-object v0
+    instance-of v0, v0, Landroid/graphics/drawable/BitmapDrawable;
+    if-eqz v0, :plain
+    :clip_try
+    invoke-virtual {p1}, Landroid/graphics/Canvas;->save()I
+    move-result v7
+    invoke-virtual {p0}, Landroid/view/View;->getWidth()I
+    move-result v1
+    invoke-virtual {p0}, Landroid/view/View;->getPaddingLeft()I
+    move-result v2
+    sub-int/2addr v1, v2
+    invoke-virtual {p0}, Landroid/view/View;->getPaddingRight()I
+    move-result v3
+    sub-int/2addr v1, v3
+    invoke-virtual {p0}, Landroid/view/View;->getHeight()I
+    move-result v4
+    invoke-virtual {p0}, Landroid/view/View;->getPaddingTop()I
+    move-result v5
+    sub-int/2addr v4, v5
+    invoke-virtual {p0}, Landroid/view/View;->getPaddingBottom()I
+    move-result v6
+    sub-int/2addr v4, v6
+    invoke-static {v1, v4}, Ljava/lang/Math;->min(II)I
+    move-result v6
+    int-to-float v6, v6
+    const/high16 v0, 0x3f000000
+    mul-float/2addr v6, v0
+    int-to-float v1, v1
+    mul-float/2addr v1, v0
+    int-to-float v2, v2
+    add-float/2addr v1, v2
+    int-to-float v4, v4
+    mul-float/2addr v4, v0
+    int-to-float v5, v5
+    add-float/2addr v4, v5
+    new-instance v0, Landroid/graphics/Path;
+    invoke-direct {v0}, Landroid/graphics/Path;-><init>()V
+    sget-object v2, Landroid/graphics/Path\$Direction;->CW:Landroid/graphics/Path\$Direction;
+    invoke-virtual {v0, v1, v4, v6, v2}, Landroid/graphics/Path;->addCircle(FFFLandroid/graphics/Path\$Direction;)V
+    invoke-virtual {p1, v0}, Landroid/graphics/Canvas;->clipPath(Landroid/graphics/Path;)Z
+    invoke-super {p0, p1}, $RSUP;->onDraw(Landroid/graphics/Canvas;)V
+    invoke-virtual {p1, v7}, Landroid/graphics/Canvas;->restoreToCount(I)V
+    :clip_end
+    .catch Ljava/lang/Throwable; {:clip_try .. :clip_end} :plain
+    return-void
+    :plain
+    invoke-super {p0, p1}, $RSUP;->onDraw(Landroid/graphics/Canvas;)V
+    return-void
+.end method
+SMEOF
+fi
 # address bar visible on the home page: the page says "search provider has a logo" -> false,
 # so the browser stops treating the (removed) search box on the page as the address bar
 NTPF=$(grep -rl '^\.field .* G:Ld3a;' code/smali* | head -1)
