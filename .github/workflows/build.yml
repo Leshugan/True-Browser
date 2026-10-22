@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # only to save the signing key into the repo once
 
 jobs:
   build:
@@ -31,11 +31,29 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Signing key (same key every build, so updates install over)
-        uses: actions/cache@v4
+      - uses: actions/checkout@v4
         with:
-          path: ks.jks
-          key: truebrowser-signing-key
+          path: repo
+
+      - name: Signing key (one key forever, so every build installs over the previous one)
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          set -e
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > ks.jks; echo "Key: repository secret"
+          elif [ -f repo/signing/truebrowser.jks ]; then
+            cp repo/signing/truebrowser.jks ks.jks; echo "Key: repo/signing/truebrowser.jks"
+          else
+            keytool -genkeypair -keystore ks.jks -storepass truebrowser -keypass truebrowser -alias tb -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=True Browser"
+            mkdir -p repo/signing && cp ks.jks repo/signing/truebrowser.jks
+            cd repo
+            git config user.name "github-actions"; git config user.email "github-actions@users.noreply.github.com"
+            git add signing/truebrowser.jks
+            git commit -m "Add True Browser signing key (created once, used for every build)"
+            git push
+            echo "Key: created and saved to signing/truebrowser.jks"
+          fi
 
       - name: Patch, align, sign
         env:
@@ -498,11 +516,7 @@ jobs:
             || curl -fsSL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
           java -Xmx6g -jar apktool.jar d -s -f -o dec app.apk > decode.log 2>&1 || (tail -50 decode.log; exit 1)
           cp dec/res/values/public.xml public.xml && rm -rf dec
-          if [ -n "$KS_B64" ]; then echo "$KS_B64" | base64 -d > ks.jks; PASS="$KS_PASS"
-          else
-            PASS=truebrowser
-            [ -f ks.jks ] || keytool -genkeypair -keystore ks.jks -storepass $PASS -keypass $PASS -alias tb -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=True Browser"
-          fi
+          PASS="${KS_PASS:-truebrowser}"
           mkdir -p out
           python3 tb/patch_apk.py app.apk public.xml p.apk | tee patch.log
           for f in $(grep -oE '^patched [^ ]+' patch.log | cut -d' ' -f2); do
