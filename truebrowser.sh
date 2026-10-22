@@ -578,6 +578,7 @@ with zipfile.ZipFile(SRC) as zin:
         changed.update(patch_layouts(zin))
     if "--no-rename" not in OPTS:
         changed.update(patch_manifest(zin))
+    names = set(zin.namelist())
     with zipfile.ZipFile(DST, "w", allowZip64=True) as zout:
         for info in zin.infolist():
             n = info.filename
@@ -592,6 +593,12 @@ with zipfile.ZipFile(SRC) as zin:
             zi.compress_type = info.compress_type
             zi.external_attr = info.external_attr
             zout.writestr(zi, data)
+        for n, path in REPLACE.items():  # new entries (extra code file)
+            if n not in names:
+                zi = zipfile.ZipInfo(n, date_time=(2020, 1, 1, 0, 0, 0))
+                zi.compress_type = zipfile.ZIP_DEFLATED
+                zout.writestr(zi, open(path, "rb").read())
+                print("added", n)
 print("written", DST)
 PYEOF
 
@@ -676,7 +683,9 @@ SMEOF
 { echo "=== menu item handler (onOptionsItemSelected)"
   grep -rn -A14 --include='*Activity.smali' 'method.* onOptionsItemSelected(Landroid/view/MenuItem;)Z' code/smali*/org/chromium/chrome/browser | grep -v '\.line' | head -60
 } >> closeall.txt 2>&1 || true
-CD=${C%%/org/*}
+# the main code file is full (65536 limit), so the helper goes into a new, extra code file
+CD=code/smali_classes$(( $(unzip -Z1 app.apk | grep -cE '^classes[0-9]*\.dex$') + 1 ))
+KEEP="$KEEP $CD"
 mkdir -p $CD/tb
 cat > $CD/tb/CloseAllItem.smali <<SMEOF
 .class public Ltb/CloseAllItem;
@@ -756,7 +765,7 @@ cat >> "$C" <<'SMEOF'
     .locals 1
     new-instance v0, Ltb/CloseAllItem;
     invoke-direct {v0}, Ltb/CloseAllItem;-><init>()V
-    invoke-virtual {p0, v0}, Lorg/chromium/chrome/browser/ChromeTabbedActivity;->onOptionsItemSelected(Landroid/view/MenuItem;)Z
+    invoke-virtual {p0, v0}, Landroid/app/Activity;->onOptionsItemSelected(Landroid/view/MenuItem;)Z
     return-void
 .end method
 SMEOF
