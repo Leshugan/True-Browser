@@ -95,9 +95,13 @@ jobs:
           }
           build "TrueBrowser-$VER-arm64"
           if [ "${{ inputs.test_variants }}" = "true" ]; then
-            build "TEST1-plain-$VER" --no-layout --no-rename
-            build "TEST2-rename-only-$VER" --no-layout
+            # TEST1: original file, only re-signed (no rebuild at all)
+            $BT/apksigner sign --ks ks.jks --ks-pass pass:$KSPASS --out "out/TEST1-resign-only-$VER.apk" app.apk
+            # TEST2: rebuilt without any changes, all libraries kept
+            build "TEST2-rebuild-all-libs-$VER" --no-layout --no-rename --keep-abis
           fi
+          echo "Stripped attributes: [$MISSING_ATTRS]"
+          unzip -l app.apk | awk '{print $4}' | grep -E '^lib/' | cut -d/ -f2 | sort | uniq -c
           rm -f ks.jks
 
       - name: Upload True Browser
@@ -106,14 +110,14 @@ jobs:
           path: out/TrueBrowser-*.apk
           archive: false
 
-      - name: Upload test 1 (plain)
+      - name: Upload test 1 (re-sign only)
         if: ${{ inputs.test_variants }}
         uses: actions/upload-artifact@v7
         with:
           path: out/TEST1-*.apk
           archive: false
 
-      - name: Upload test 2 (rename only)
+      - name: Upload test 2 (rebuild, all libs)
         if: ${{ inputs.test_variants }}
         uses: actions/upload-artifact@v7
         with:
