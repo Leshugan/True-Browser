@@ -24,51 +24,43 @@ jobs:
           gh release view -R jqssun/android-titanium-browser --json tagName,assets > rel.json
           TAG=$(jq -r .tagName rel.json)
           NAME=$(jq -r '.assets[].name' rel.json | grep -i arm64 | grep -i '\.apk$' | head -1)
-          echo "TAG=$TAG NAME=$NAME"
           gh release download "$TAG" -R jqssun/android-titanium-browser -p "$NAME" -O app.apk
           echo "$TAG $NAME" > info.txt
-          ls -la app.apk
 
       - name: Decode
         run: |
           set -e
           curl -sSL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
           java -Xmx6g -jar apktool.jar d -f -o dec app.apk > decode.log 2>&1 || (tail -50 decode.log; exit 1)
-          tail -5 decode.log
 
       - name: Report
         run: |
-          R=report.txt
-          {
-            echo "=== INFO"; cat info.txt
-            echo "=== MANIFEST (head)"; head -c 3000 dec/AndroidManifest.xml; echo
-            echo "=== DIRS"; ls dec; ls dec | grep -c smali
-            echo "=== LAYOUTS (tab/hub)"
-            ls dec/res/layout/ | grep -iE 'hub|tab_switcher|tab_grid|tab_list|tab_group|pane|incognito_toggle|new_tab' | sort
-          } > $R
-          for f in $(ls dec/res/layout/ | grep -iE '^hub|tab_switcher_pane|tab_list_recycler|tab_list_editor|tab_grid|pane_' | sort | head -40); do
-            echo "=== FILE res/layout/$f" >> $R
-            head -c 6000 "dec/res/layout/$f" >> $R; echo >> $R
+          R=report2.txt
+          cat info.txt > $R
+          echo "=== JAVA FEATURE NAMES (hub/tab/bottom/toolbar)" >> $R
+          grep -rhoE '"[A-Z][A-Za-z0-9]*(Hub|TabSwitcher|TabGrid|BottomBar|Bottom|Toolbar|Pane)[A-Za-z0-9]*"' dec/smali* | sort -u | head -300 >> $R
+          echo "=== NATIVE FLAG NAMES" >> $R
+          for so in dec/lib/arm64-v8a/*.so; do strings -n 6 "$so"; done > so_strings.txt
+          grep -E '^[a-z0-9]+(-[a-z0-9]+)+$' so_strings.txt | grep -iE 'hub|tab-switcher|tab-grid|bottom|toolbar|pane' | sort -u | head -300 >> $R
+          echo "=== NATIVE FLAG DESCRIPTIONS" >> $R
+          grep -iE '(hub|tab switcher|tab grid|bottom toolbar|bottom bar)' so_strings.txt | grep ' ' | awk 'length($0)<300' | sort -u | head -200 >> $R
+          echo "=== LAYOUTS WITH HUB / TAB LIST IDS" >> $R
+          for f in $(grep -lE '@id/(hub_toolbar|hub_bottom_toolbar|hub_pane_host|hub_main_container|pane_switcher|tab_list_recycler_view|toolbar_action_button)' dec/res/layout*/*.xml | head -20); do
+            echo "##### $f" >> $R; head -c 8000 "$f" >> $R; echo >> $R
           done
-          echo "=== PUBLIC IDS" >> $R
-          grep -E 'name="(hub_[a-z_]*|pane_[a-z_]*|tab_list_recycler_view|tab_switcher[a-z_]*|toolbar_action_button|menu_button|pane_switcher|search_box|incognito_toggle_tabs)"' dec/res/values/public.xml > ids.txt || true
-          cat ids.txt >> $R
-          echo "=== SMALI USING IDS" >> $R
-          grep -oE 'name="[a-z_]+" id="0x[0-9a-f]+"' ids.txt | while read -r l; do
-            n=$(echo "$l" | sed -E 's/name="([a-z_]+)".*/\1/'); h=$(echo "$l" | sed -E 's/.*id="(0x[0-9a-f]+)".*/\1/')
-            echo "--- $n $h" >> $R
-            grep -rl --include=*.smali "$h" dec/smali* 2>/dev/null | head -6 >> $R
+          echo "=== KEY SMALI (methods, ids, layout calls)" >> $R
+          for c in u57 f57 w77 e3g h3g ife ae0 vhg t37 yhg org/chromium/chrome/browser/hub/HubToolbarView org/chromium/chrome/browser/hub/HubPaneHostView; do
+            f=$(ls dec/smali*/$c.smali 2>/dev/null | head -1); [ -z "$f" ] && continue
+            echo "##### $f ($(wc -l < $f) lines)" >> $R
+            grep -nE '^\.class|^\.super|^\.implements|^\.method|0x7f0[0-9a-f]{5}|Gravity|LayoutParams|setReverse|StackFromEnd|Layout\(|invoke-.*->(addView|setLayoutManager|setOrientation|scrollToPosition)|"[A-Za-z]+"' "$f" | head -150 >> $R
           done
-          echo "=== SMALI STRINGS" >> $R
-          for s in 'TabSwitcher' 'GridTabSwitcher' 'Hub' 'TabListRecycler' 'setReverseLayout' 'setStackFromEnd'; do
-            echo "--- $s" >> $R
-            grep -rl --include=*.smali "$s" dec/smali* 2>/dev/null | head -10 >> $R
-          done
+          echo "=== CLASSES WITH SPAN COUNT / GRID" >> $R
+          grep -rlE 'mSpanCount|spanCount|SpanSizeLookup' dec/smali* | head -20 >> $R
           wc -c $R
 
       - name: Upload report
         uses: actions/upload-artifact@v7
         with:
-          name: report
-          path: report.txt
+          name: report2
+          path: report2.txt
           archive: false
