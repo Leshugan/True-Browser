@@ -1019,6 +1019,37 @@ open("ntp_dirs.txt", "w").write(" ".join("code/" + x for x in sorted(dirs)))
 assert n > 0, "home page logo flags not found"
 NTEOF
 KEEP="$KEEP $(cat ntp_dirs.txt)"
+# the toolbar asks the home page "is the address bar shown inside the page?" (method k() of the
+# home-page interface used by ToolbarPhone) -> always "no", so the toolbar shows its own address bar
+TPH=$(ls code/smali*/org/chromium/chrome/browser/toolbar/top/ToolbarPhone.smali | head -1)
+IFACE=$(grep -oE 'invoke-interface \{[^}]*\}, L[a-z0-9]+;->k\(\)Z' "$TPH" | head -1 | grep -oE 'L[a-z0-9]+;' )
+{ echo "=== home page interface used by the toolbar: $IFACE"
+  for f in $(grep -rl "^\.implements $IFACE" code/smali*); do
+    echo ">> $f"
+    awk '/^\.method .* [a-z]\(\)Z$/{f=1} f{print} f&&/^\.end method/{f=0}' "$f" | grep -v '^\s*\.line\|^\s*$' | head -120
+  done
+} > ntp_iface.txt 2>&1 || true
+python3 - "$IFACE" code <<'IFEOF'
+import os, sys
+iface, root = sys.argv[1], sys.argv[2]
+n = 0; dirs = set()
+for d, _, fs in os.walk(root):
+    for f in fs:
+        if not f.endswith(".smali"): continue
+        path = os.path.join(d, f); s = open(path).read()
+        if (".implements %s\n" % iface) not in s: continue
+        i = s.find(".method public final k()Z\n")
+        if i < 0: i = s.find(".method public k()Z\n")
+        if i < 0: continue
+        li = s.index(".locals", i); j = s.index("\n", li) + 1
+        if s[li:j].strip() == ".locals 0":
+            s = s[:li] + ".locals 1\n" + s[j:]; j = s.index("\n", li) + 1
+        s = s[:j] + "    # True Browser: the address bar is never inside the home page\n    const/4 v0, 0x0\n    return v0\n" + s[j:]
+        open(path, "w").write(s); n += 1; dirs.add(path.split(os.sep)[1])
+print("home page 'address bar inside page' answers forced to no:", n, sorted(dirs))
+open("ntp_dirs2.txt", "w").write(" ".join("code/" + x for x in sorted(dirs)))
+IFEOF
+KEEP="$KEEP $(cat ntp_dirs2.txt)"
 # bottom address bar also on the home page: the position decision ignores "home page is showing"
 TP=$(grep -rl 'cr_ToolbarPosition' code/smali* | head -1)
 python3 - "$TP" <<'TPEOF'
@@ -1062,5 +1093,6 @@ echo "=== code: $KEEP" >> $R
 grep -n -A45 'True Browser: hide' "$F" | grep -v '\.line' >> $R
 tail -20 codebuild.log >> $R
 cat closeall.txt >> $R
+cat ntp_iface.txt >> $R
 wc -c $R
 echo "::endgroup::"
