@@ -35,6 +35,7 @@ jobs:
           java -Xmx12g -jar apktool.jar d -f -o dec app.apk > decode.log 2>&1 || (tail -50 decode.log; exit 1)
 
       - name: Report
+        shell: bash {0}
         run: |
           R=report3.txt
           cat info.txt > $R
