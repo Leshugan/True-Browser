@@ -565,6 +565,89 @@ def patch_layouts(zin):
     return changed
 
 
+# ---------- chrome://extensions page (inside resources.pak) ----------
+PAK_EDITS = [
+    # developer buttons wrap onto several rows instead of being cut off
+    ('#buttonStrip cr-button{margin-inline-end:16px}',
+     '#buttonStrip cr-button{margin-inline-end:16px}'
+     '#devDrawer[expanded]{height:auto}'
+     '#buttonStrip{position:static;display:flex;flex-wrap:wrap;gap:8px;box-sizing:border-box;'
+     'width:auto;margin-inline-start:16px;margin-inline-end:16px}'
+     '#buttonStrip cr-button{margin-inline-end:0}'
+     '#devDrawer:not([expanded]) #buttonStrip{display:none}'),
+    # "install from CRX" button
+    ('<cr-button ?hidden="${!this.canLoadUnpacked_()}" id="loadUnpacked"',
+     '<cr-button id="tbInstallCrx" @click="${this.onTbInstallCrxClick_}">'
+     'Установить из CRX</cr-button>\n'
+     '    <cr-button ?hidden="${!this.canLoadUnpacked_()}" id="loadUnpacked"'),
+    # the file is handed to the browser as an extension download -> the browser's own install prompt
+    ('onUpdateNowClick_(){',
+     'onTbInstallCrxClick_(){const inp=document.createElement("input");inp.type="file";'
+     'inp.onchange=()=>{const f=inp.files&&inp.files[0];if(!f)return;'
+     'f.arrayBuffer().then(buf=>{const u=URL.createObjectURL(new Blob([buf],{type:"application/x-chrome-extension"}));'
+     'const a=document.createElement("a");a.href=u;'
+     'a.download=(f.name.replace(/\\.crx$/i,"")||"extension")+".crx";'
+     'document.body.appendChild(a);a.click();a.remove();'
+     'setTimeout(()=>URL.revokeObjectURL(u),120000)})};inp.click()}'
+     'onUpdateNowClick_(){'),
+]
+
+
+def pak_entries(data):
+    ver = struct.unpack_from("<I", data, 0)[0]
+    if ver != 5:
+        raise ValueError("pak version %d" % ver)
+    _, enc, cnt, na = struct.unpack_from("<IIHH", data, 0)
+    ents = [struct.unpack_from("<HI", data, 12 + 6 * k) for k in range(cnt + 1)]
+    aoff = 12 + 6 * (cnt + 1)
+    aliases = data[aoff:aoff + 4 * na]
+    return enc, ents, aliases
+
+
+def patch_paks(zin):
+    import gzip
+    changed = {}
+    for n in zin.namelist():
+        if not n.startswith("assets/resources.pak"):
+            continue
+        data = zin.read(n)
+        enc, ents, aliases = pak_entries(data)
+        cnt = len(ents) - 1
+        blobs = [data[ents[k][1]:ents[k + 1][1]] for k in range(cnt)]
+        hit = False
+        for k, b in enumerate(blobs):
+            if b[:2] != b"\x1f\x8b":
+                continue
+            t = gzip.decompress(b)
+            if b'id="loadUnpacked"' not in t or b"onUpdateNowClick_(){" not in t:
+                continue
+            s = t.decode("utf-8")
+            for old, new in PAK_EDITS:
+                if s.count(old) != 1:
+                    die("extensions page: anchor not found: %s" % old[:40])
+                s = s.replace(old, new)
+            blobs[k] = gzip.compress(s.encode("utf-8"), 9, mtime=0)
+            hit = True
+            print("extensions page patched: %s id=%d" % (n, ents[k][0]))
+        if not hit:
+            continue
+        head = 12 + 6 * (cnt + 1) + len(aliases)
+        out = bytearray(struct.pack("<IIHH", 5, enc, cnt, len(aliases) // 4))
+        off = head
+        table = bytearray()
+        for k in range(cnt):
+            table += struct.pack("<HI", ents[k][0], off)
+            off += len(blobs[k])
+        table += struct.pack("<HI", ents[cnt][0], off)
+        out += table + aliases
+        for b in blobs:
+            out += b
+        changed[n] = bytes(out)
+    if not changed:
+        die("extensions page not found in resources.pak")
+    return changed
+
+
 def patch_manifest(zin):
     x = AXML(zin.read("AndroidManifest.xml"))
     cnt = 0
@@ -600,6 +683,7 @@ with zipfile.ZipFile(SRC) as zin:
         changed.update(patch_layouts(zin))
     if "--no-rename" not in OPTS:
         changed.update(patch_manifest(zin))
+    changed.update(patch_paks(zin))
     names = set(zin.namelist())
     with zipfile.ZipFile(DST, "w", allowZip64=True) as zout:
         for info in zin.infolist():
@@ -1198,52 +1282,5 @@ grep -n -A45 'True Browser: hide' "$F" | grep -v '\.line' >> $R
 tail -20 codebuild.log >> $R
 cat closeall.txt >> $R
 cat ntp_iface.txt >> $R
-# data for "install extension from CRX" (read by Claude)
-pip install -q brotli > /dev/null 2>&1
-python3 - app.apk >> $R 2>&1 <<'CRXEOF'
-import gzip, io, re, struct, sys, zipfile
-z = zipfile.ZipFile(sys.argv[1])
-names = z.namelist()
-print("=== CRX: built-in Titanium extension (assets/extensions)")
-for n in names:
-    if n.startswith("assets/extensions/") and not n.endswith(".crx"):
-        print("##", n); print(z.read(n).decode("utf-8", "replace"))
-for n in names:
-    if n.startswith("assets/extensions/") and n.endswith(".crx"):
-        d = z.read(n)
-        hl = struct.unpack_from("<I", d, 8)[0] if d[:4] == b"Cr24" else 0
-        inner = zipfile.ZipFile(io.BytesIO(d[12 + hl:]))
-        for m in inner.namelist():
-            print("#### %s :: %s (%d)" % (n, m, inner.getinfo(m).file_size))
-            if re.search(r"\.(js|json|html|css)$", m):
-                print(inner.read(m).decode("utf-8", "replace"))
-def unpak(data):
-    ver = struct.unpack_from("<I", data, 0)[0]
-    if ver == 5:
-        _, enc, cnt, na = struct.unpack_from("<IIHH", data, 0); off = 12
-    else:
-        cnt, enc = struct.unpack_from("<IB", data, 4); off = 9
-    ents = [struct.unpack_from("<HI", data, off + 6 * k) for k in range(cnt + 1)]
-    for k in range(cnt):
-        rid, s = ents[k]; e = ents[k + 1][1]; b = data[s:e]; kind = "raw"
-        try:
-            if b[:2] == b"\x1e\x9b":
-                import brotli; b = brotli.decompress(b[8:]); kind = "br"
-            elif b[:2] == b"\x1f\x8b":
-                b = gzip.decompress(b); kind = "gz"
-        except Exception:
-            kind = "err"
-        yield rid, kind, b
-print("=== CRX: chrome://extensions page resources (full text)")
-for n in names:
-    if ".pak" not in n or "/locales/" in n: continue
-    try:
-        for rid, kind, b in unpak(z.read(n)):
-            if b"extensions-toolbar" in b or b"loadUnpacked" in b or b"installDroppedFile" in b:
-                print("#### PAK %s id=%d %s len=%d" % (n, rid, kind, len(b)))
-                print(b.decode("utf-8", "replace"))
-    except Exception as e:
-        print("pak", n, "error", e)
-CRXEOF
 wc -c $R
 echo "::endgroup::"
