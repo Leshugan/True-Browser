@@ -16,10 +16,15 @@ if [ ! -f truebrowser.jks ]; then   # created once, every build signs with it ->
     -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=True Browser"
   git add truebrowser.jks
 fi
+if [ ! -f truebrowser_ext.pem ]; then   # key of the built-in helper extension: created once, keeps its ID forever
+  openssl genrsa -out truebrowser_ext.pem 2048 2>/dev/null
+  git add truebrowser_ext.pem
+fi
 # keep only: the build script, the key, the workflow, README/LICENSE
-git ls-files | grep -vE '^(truebrowser\.sh|truebrowser\.jks|\.github/.*|README.*|LICENSE.*)$' | while read -r f; do git rm -q -- "$f"; echo "removed $f"; done || true
+git ls-files | grep -vE '^(truebrowser\.sh|truebrowser\.jks|truebrowser_ext\.pem|\.github/.*|README.*|LICENSE.*)$' | while read -r f; do git rm -q -- "$f"; echo "removed $f"; done || true
 if ! git diff --cached --quiet; then git commit -qm "Tidy repo: build script and signing key in the root"; git push -q; fi
 cp truebrowser.jks "$GITHUB_WORKSPACE/ks.jks"
+cp truebrowser_ext.pem "$GITHUB_WORKSPACE/ext.pem"
 cd "$GITHUB_WORKSPACE"
 echo "::endgroup::"
 
@@ -580,15 +585,9 @@ PAK_EDITS = [
      '<cr-button id="tbInstallCrx" @click="${this.onTbInstallCrxClick_}">'
      'Установить из CRX</cr-button>\n'
      '    <cr-button ?hidden="${!this.canLoadUnpacked_()}" id="loadUnpacked"'),
-    # the file is handed to the browser as an extension download -> the browser's own install prompt
+    # opens the built-in helper's page (file picker); the helper hands the CRX to the browser's own installer
     ('onUpdateNowClick_(){',
-     'onTbInstallCrxClick_(){const inp=document.createElement("input");inp.type="file";'
-     'inp.onchange=()=>{const f=inp.files&&inp.files[0];if(!f)return;'
-     'f.arrayBuffer().then(buf=>{const u=URL.createObjectURL(new Blob([buf],{type:"application/x-chrome-extension"}));'
-     'const a=document.createElement("a");a.href=u;'
-     'a.download=(f.name.replace(/\\.crx$/i,"")||"extension")+".crx";'
-     'document.body.appendChild(a);a.click();a.remove();'
-     'setTimeout(()=>URL.revokeObjectURL(u),120000)})};inp.click()}'
+     'onTbInstallCrxClick_(){window.open("chrome-extension://%s/install.html","_blank")}' % os.environ["TB_EXT_ID"] +
      'onUpdateNowClick_(){'),
 ]
 
@@ -702,7 +701,7 @@ with zipfile.ZipFile(SRC) as zin:
         for n, path in REPLACE.items():  # new entries (extra code file)
             if n not in names:
                 zi = zipfile.ZipInfo(n, date_time=(2020, 1, 1, 0, 0, 0))
-                zi.compress_type = zipfile.ZIP_DEFLATED
+                zi.compress_type = zipfile.ZIP_STORED if n.endswith(".crx") else zipfile.ZIP_DEFLATED
                 zout.writestr(zi, open(path, "rb").read())
                 print("added", n)
 print("written", DST)
@@ -1259,6 +1258,169 @@ for d in $(echo $KEEP | tr ' ' '\n' | sort -u); do
   REPL+=("--replace=$X=newdex/$X")
   echo "rebuilt $X ($(du -h newdex/$X | cut -f1))"
 done
+echo "::endgroup::"
+
+echo "::group::Built-in helper extension (install from CRX)"
+mkdir -p ext
+cat > ext/manifest.json <<'EXEOF'
+{
+  "manifest_version": 3,
+  "name": "True Browser",
+  "version": "1.0.0",
+  "description": "Встроенный помощник True Browser: установка расширений из файлов CRX и сразу при их скачивании.",
+  "permissions": ["downloads"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "bg.js" }
+}
+EXEOF
+cat > ext/bg.js <<'EXEOF'
+"use strict";
+// A .crx that a site hands out as an ordinary file: stop that download and offer to install it.
+const CRX = "application/x-chrome-extension";
+function crxUrl(u) {
+  try { return /\.crx$/i.test(new URL(u).pathname); } catch { return false; }
+}
+chrome.downloads.onCreated.addListener(async (item) => {
+  if (item.byExtensionId === chrome.runtime.id) return;
+  if (item.mime === CRX) return; // the browser installs these itself
+  const url = item.finalUrl || item.url;
+  if (!/^https?:/i.test(url)) return;
+  if (!crxUrl(url) && !/\.crx$/i.test(item.filename || "")) return;
+  try { await chrome.downloads.cancel(item.id); } catch {}
+  try { await chrome.downloads.erase({ id: item.id }); } catch {}
+  chrome.tabs.create({ url: chrome.runtime.getURL("install.html") + "#u=" + encodeURIComponent(url), active: true });
+});
+EXEOF
+cat > ext/install.html <<'EXEOF'
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Установка расширения</title>
+<style>
+:root { color-scheme: light dark; --bg:#EEF1F4; --card:#FFFFFF; --fg:#1b1d21; --muted:#5f6670; --accent:#2F80ED; }
+@media (prefers-color-scheme: dark) { :root { --bg:#1d1715; --card:#2a2220; --fg:#f0e4de; --muted:#b9aaa3; --accent:#ffb59d; } }
+html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:16px/1.45 system-ui, sans-serif; }
+main { min-height:100%; box-sizing:border-box; display:flex; flex-direction:column; justify-content:flex-end; gap:16px; padding:24px 16px 40px; }
+.card { background:var(--card); border-radius:24px; padding:20px; }
+h1 { font-size:20px; margin:0 0 6px; }
+#status { color:var(--muted); margin:0; word-break:break-word; }
+button { width:100%; border:0; border-radius:20px; padding:16px; font:600 16px system-ui, sans-serif; background:var(--accent); color:#fff; }
+@media (prefers-color-scheme: dark) { button { color:#3a1a10; } }
+button[hidden] { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Установка расширения</h1>
+    <p id="status">Выберите файл CRX — браузер покажет своё окно установки.</p>
+  </div>
+  <button id="pick">Выбрать файл CRX</button>
+  <input id="file" type="file" hidden>
+</main>
+<script src="install.js"></script>
+</body>
+</html>
+EXEOF
+cat > ext/install.js <<'EXEOF'
+"use strict";
+const CRX = "application/x-chrome-extension";
+const status = document.getElementById("status");
+const pick = document.getElementById("pick");
+const file = document.getElementById("file");
+
+function crxName(name) {
+  const base = (name || "").split(/[\/?#]/).filter(Boolean).pop() || "extension";
+  return base.replace(/\.crx$/i, "").replace(/[^\w.-]+/g, "_").slice(0, 80) + ".crx";
+}
+
+// The browser installs an extension when a CRX is downloaded by an extension:
+// the file is handed over as such a download and the browser shows its own install prompt.
+async function install(buf, name) {
+  const bytes = new Uint8Array(buf);
+  if (!(bytes.length > 4 && bytes[0] === 0x43 && bytes[1] === 0x72 && bytes[2] === 0x32 && bytes[3] === 0x34)) {
+    throw new Error("это не файл расширения CRX");
+  }
+  const url = URL.createObjectURL(new Blob([bytes], { type: CRX }));
+  const id = await chrome.downloads.download({ url, filename: crxName(name), conflictAction: "uniquify" });
+  status.textContent = "Подтвердите установку в окне браузера.";
+  const accept = (danger) => {
+    if (danger && danger !== "safe" && danger !== "accepted") chrome.downloads.acceptDanger(id).catch(() => {});
+  };
+  chrome.downloads.onChanged.addListener(function onChanged(d) {
+    if (d.id !== id) return;
+    if (d.danger) accept(d.danger.current);
+    if (d.state && d.state.current !== "in_progress") {
+      chrome.downloads.onChanged.removeListener(onChanged);
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      if (d.state.current === "interrupted") status.textContent = "Установка прервана.";
+    }
+  });
+  const [item] = await chrome.downloads.search({ id });
+  if (item) accept(item.danger);
+}
+
+function fail(e) {
+  status.textContent = "Не получилось: " + (e && e.message ? e.message : e);
+  pick.hidden = false;
+}
+
+pick.addEventListener("click", () => file.click());
+file.addEventListener("change", () => {
+  const f = file.files && file.files[0];
+  if (!f) return;
+  pick.hidden = true;
+  status.textContent = "Открываю " + f.name + "…";
+  f.arrayBuffer().then((b) => install(b, f.name)).catch(fail);
+});
+
+const m = /^#u=(.+)$/.exec(location.hash);
+if (m) {
+  const src = decodeURIComponent(m[1]);
+  pick.hidden = true;
+  status.textContent = "Скачиваю расширение…";
+  fetch(src, { credentials: "include" })
+    .then((r) => { if (!r.ok) throw new Error("ошибка загрузки " + r.status); return r.arrayBuffer(); })
+    .then((b) => install(b, src))
+    .catch(fail);
+}
+EXEOF
+python3 - <<'PKEOF'
+import hashlib, io, json, os, struct, subprocess, zipfile
+def varint(n):
+    out = b""
+    while True:
+        b = n & 0x7F; n >>= 7
+        if n: out += bytes([b | 0x80])
+        else: return out + bytes([b])
+def field(num, data):
+    return varint((num << 3) | 2) + varint(len(data)) + data
+zbuf = io.BytesIO()
+with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
+    for n in sorted(os.listdir("ext")):
+        zi = zipfile.ZipInfo(n, date_time=(2020, 1, 1, 0, 0, 0)); zi.compress_type = zipfile.ZIP_DEFLATED
+        z.writestr(zi, open(os.path.join("ext", n), "rb").read())
+zbytes = zbuf.getvalue()
+pub = subprocess.run(["openssl", "rsa", "-in", "ext.pem", "-pubout", "-outform", "DER"], capture_output=True, check=True).stdout
+crx_id = hashlib.sha256(pub).digest()[:16]
+ext_id = "".join("abcdefghijklmnop"[int(c, 16)] for c in crx_id.hex())
+signed_data = field(1, crx_id)
+msg = b"CRX3 SignedData\x00" + struct.pack("<I", len(signed_data)) + signed_data + zbytes
+open("ext.msg", "wb").write(msg)
+sig = subprocess.run(["openssl", "dgst", "-sha256", "-sign", "ext.pem", "ext.msg"], capture_output=True, check=True).stdout
+header = field(2, field(1, pub) + field(2, sig)) + field(10000, signed_data)
+open("truebrowser.crx", "wb").write(b"Cr24" + struct.pack("<II", 3, len(header)) + header + zbytes)
+version = json.load(open("ext/manifest.json"))["version"]
+bundled = json.loads(zipfile.ZipFile("app.apk").read("assets/extensions/bundled.json"))
+bundled[ext_id] = {"external_crx": "truebrowser.crx", "external_version": version}
+open("bundled.json", "w").write(json.dumps(bundled, indent=2))
+open("ext_id.txt", "w").write(ext_id)
+print("helper extension", ext_id, "version", version, "crx", len(b"Cr24") + 8 + len(header) + len(zbytes), "bytes")
+PKEOF
+TB_EXT_ID=$(cat ext_id.txt); export TB_EXT_ID
+REPL+=("--replace=assets/extensions/bundled.json=bundled.json" "--replace=assets/extensions/truebrowser.crx=truebrowser.crx")
 echo "::endgroup::"
 
 echo "::group::Patch, align, sign"
