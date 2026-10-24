@@ -1206,6 +1206,59 @@ open("ntp_dirs.txt", "w").write(" ".join("code/" + x for x in sorted(dirs)))
 assert n > 0, "home page logo flags not found"
 NTEOF
 KEEP="$KEEP $(cat ntp_dirs.txt)"
+# extension files (.crx): no "this type of file can harm your device" question - answered "save" at once
+# (the helper's own window already asked Save / Cancel / Install)
+DGB=$(ls code/smali*/org/chromium/chrome/browser/download/DangerousDownloadDialogBridge.smali | head -1)
+python3 - "$DGB" <<'DGEOF'
+import re, sys
+f = sys.argv[1]; s = open(f).read()
+sig = ".method public final showDialog(Lorg/chromium/ui/base/WindowAndroid;Ljava/lang/String;Ljava/lang/String;JLjava/lang/String;IZ)V"
+m = s.index(sig); e = s.index(".end method", m)
+body = re.sub(r"(?m)^\s*\.line .*$", "", s[m:e])
+cb = re.search(r"new-instance (\w+), (L\w+;)\s+const/4 (\w+), 0x0\s+invoke-direct \{\1, \3\}, \2-><init>\(B\)V\s+"
+               r"iput-object p0, \1, \2->(\w+):(L[^;]+;)\s+iput-object p2, \1, \2->(\w+):(L[^;]+;)\s+"
+               r"iput-object p1, \1, \2->(\w+):(L[^;]+;)", body)
+assert cb, "dangerous-file dialog answer not found"
+L = cb.group(2)
+inj = f"""    # True Browser: .crx -> answered "save" without asking
+    if-eqz p3, :tb_ask
+    invoke-virtual {{p3}}, Ljava/lang/String;->toLowerCase()Ljava/lang/String;
+    move-result-object v0
+    const-string/jumbo v1, ".crx"
+    invoke-virtual {{v0, v1}}, Ljava/lang/String;->endsWith(Ljava/lang/String;)Z
+    move-result v0
+    if-eqz v0, :tb_ask
+    new-instance v8, {L}
+    const/4 v0, 0x0
+    invoke-direct {{v8, v0}}, {L}-><init>(B)V
+    iput-object p0, v8, {L}->{cb.group(4)}:{cb.group(5)}
+    iput-object p2, v8, {L}->{cb.group(6)}:{cb.group(7)}
+    iput-object p1, v8, {L}->{cb.group(8)}:{cb.group(9)}
+    sget-object v0, Ljava/lang/Boolean;->TRUE:Ljava/lang/Boolean;
+    invoke-interface {{v8, v0}}, Lorg/chromium/base/Callback;->onResult(Ljava/lang/Object;)V
+    return-void
+    :tb_ask
+"""
+li = s.index(".locals", m); le = s.index("\n", li) + 1
+s = s[:le] + inj + s[le:]
+open(f, "w").write(s)
+print("dangerous-file dialog: auto 'save' for .crx via", L)
+DGEOF
+# settings: the "Sign in" entry is shown even though sign-in is switched off in this build
+SIP=$(ls code/smali*/org/chromium/chrome/browser/sync/settings/SignInPreference.smali | head -1)
+python3 - "$SIP" <<'SIEOF'
+import re, sys
+f = sys.argv[1]; s = open(f).read()
+m = s.index(".method public final m0()V"); e = s.index(".end method", m)
+body = s[m:e]
+k = body.index('"signin.allowed"')
+mm = re.compile(r"if-nez (\w+), (:cond_\w+)").search(body, k)
+assert mm, "sign-in switch not found"
+body = body[:mm.start()] + "goto %s  # True Browser: always show the Sign in entry" % mm.group(2) + body[mm.end():]
+s = s[:m] + body + s[e:]
+open(f, "w").write(s)
+print("settings: Sign in entry always shown")
+SIEOF
 # extension files (.crx): no "where to save" dialog - the download goes straight on, so the browser's
 # own "add extension" prompt comes up at once (same as pressing Cancel in that dialog)
 DDB=$(ls code/smali*/org/chromium/chrome/browser/download/DownloadDialogBridge.smali | head -1)
@@ -1330,16 +1383,16 @@ cat > ext/manifest.json <<'EXEOF'
 {
   "manifest_version": 3,
   "name": "True Browser",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Встроенный помощник True Browser: установка расширений из файлов CRX и сразу при их скачивании.",
-  "permissions": ["downloads"],
+  "permissions": ["downloads", "storage"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "bg.js" }
 }
 EXEOF
 cat > ext/bg.js <<'EXEOF'
 "use strict";
-// A .crx that a site hands out as an ordinary file: stop that download and install it instead.
+// A .crx that a site hands out as an ordinary file: stop that download and ask Save / Cancel / Install.
 const CRX = "application/x-chrome-extension";
 const handled = new Set();
 function isCrx(item) {
@@ -1358,13 +1411,24 @@ async function take(item) {
   try { await chrome.downloads.erase({ id: item.id }); } catch {}
   chrome.tabs.create({ url: chrome.runtime.getURL("install.html") + "#u=" + encodeURIComponent(url), active: true });
 }
-chrome.downloads.onDeterminingFilename.addListener((item, suggest) => { suggest(); take(item); });
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  if (item.byExtensionId === chrome.runtime.id) {
+    // our own downloads get the extension's real name instead of a random one
+    chrome.storage.session.get("names").then(({ names = {} }) => {
+      const name = names[item.url];
+      if (name) suggest({ filename: name, conflictAction: "uniquify" }); else suggest();
+    }).catch(() => suggest());
+    return true;
+  }
+  suggest();
+  take(item);
+});
 chrome.downloads.onCreated.addListener((item) => { take(item); });
-// our own hand-over downloads: the browser deletes the file after installing; drop the list entry too
+// our install hand-overs: the browser deletes the file after installing; drop the list entry too
 chrome.downloads.onChanged.addListener(async (d) => {
   if (!d.state || d.state.current === "in_progress") return;
   const [item] = await chrome.downloads.search({ id: d.id });
-  if (item && item.byExtensionId === chrome.runtime.id) {
+  if (item && item.byExtensionId === chrome.runtime.id && item.mime === CRX) {
     setTimeout(() => chrome.downloads.erase({ id: d.id }).catch(() => {}), 60000);
   }
 });
@@ -1377,25 +1441,31 @@ cat > ext/install.html <<'EXEOF'
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Установка расширения</title>
 <style>
-:root { color-scheme: light dark; --bg:#EEF1F4; --card:#FFFFFF; --fg:#1b1d21; --muted:#5f6670; --accent:#2F80ED; }
-@media (prefers-color-scheme: dark) { :root { --bg:#1d1715; --card:#2a2220; --fg:#f0e4de; --muted:#b9aaa3; --accent:#ffb59d; } }
+:root { color-scheme: light dark; --bg:#EEF1F4; --card:#FFFFFF; --fg:#1b1d21; --muted:#5f6670; --accent:#2F80ED; --on:#fff; }
+@media (prefers-color-scheme: dark) { :root { --bg:#1d1715; --card:#2a2220; --fg:#f0e4de; --muted:#b9aaa3; --accent:#ffb59d; --on:#3a1a10; } }
 html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:16px/1.45 system-ui, sans-serif; }
-main { min-height:100%; box-sizing:border-box; display:flex; flex-direction:column; justify-content:flex-end; gap:16px; padding:24px 16px 40px; }
+main { min-height:100%; box-sizing:border-box; display:flex; flex-direction:column; justify-content:flex-end; gap:12px; padding:24px 16px 40px; }
 .card { background:var(--card); border-radius:24px; padding:20px; }
-h1 { font-size:20px; margin:0 0 6px; }
+h1 { font-size:20px; margin:0 0 6px; word-break:break-word; }
 #status { color:var(--muted); margin:0; word-break:break-word; }
-button { width:100%; border:0; border-radius:20px; padding:16px; font:600 16px system-ui, sans-serif; background:var(--accent); color:#fff; }
-@media (prefers-color-scheme: dark) { button { color:#3a1a10; } }
-button[hidden] { display:none; }
+.row { display:flex; gap:8px; }
+button { flex:1; border:0; border-radius:20px; padding:16px 8px; font:600 16px system-ui, sans-serif; background:var(--card); color:var(--accent); }
+button.main { background:var(--accent); color:var(--on); }
+[hidden] { display:none !important; }
 </style>
 </head>
 <body>
 <main>
   <div class="card">
-    <h1>Установка расширения</h1>
+    <h1 id="title">Установка расширения</h1>
     <p id="status">Выберите файл CRX — браузер покажет своё окно установки.</p>
   </div>
-  <button id="pick">Выбрать файл CRX</button>
+  <div class="row" id="choice" hidden>
+    <button id="save">Сохранить</button>
+    <button id="cancel">Отмена</button>
+    <button id="install" class="main">Установить</button>
+  </div>
+  <button id="pick" class="main">Выбрать файл CRX</button>
   <input id="file" type="file" hidden>
 </main>
 <script src="install.js"></script>
@@ -1405,65 +1475,139 @@ EXEOF
 cat > ext/install.js <<'EXEOF'
 "use strict";
 const CRX = "application/x-chrome-extension";
-const status = document.getElementById("status");
-const pick = document.getElementById("pick");
-const file = document.getElementById("file");
+const $ = (id) => document.getElementById(id);
+const status = $("status"), title = $("title"), pick = $("pick"), file = $("file"), choice = $("choice");
 
-function crxName(name) {
-  const base = (name || "").split(/[\/?#]/).filter(Boolean).pop() || "extension";
-  // a fresh name every time, so the browser never asks to download an existing file again
-  return base.replace(/\.crx$/i, "").replace(/[^\w.-]+/g, "_").slice(0, 60) + "-" + Date.now().toString(36) + ".crx";
+function closeTab(delay) {
+  setTimeout(() => chrome.tabs.getCurrent((t) => t && chrome.tabs.remove(t.id)), delay || 0);
+}
+function safeName(name) {
+  return (name || "extension").replace(/[\\/:*?"<>|\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "extension";
+}
+function isCrx(b) { return b.length > 16 && b[0] === 0x43 && b[1] === 0x72 && b[2] === 0x32 && b[3] === 0x34; }
+
+// reads the extension's name from the manifest inside the CRX (zip after the CRX header)
+async function readZipFile(zip, wanted) {
+  const dv = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+  let eocd = -1;
+  for (let i = zip.length - 22; i >= Math.max(0, zip.length - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) return null;
+  let p = dv.getUint32(eocd + 16, true);
+  const n = dv.getUint16(eocd + 10, true);
+  for (let k = 0; k < n; k++) {
+    const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true);
+    const nl = dv.getUint16(p + 28, true), el = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true);
+    const lho = dv.getUint32(p + 42, true);
+    const name = new TextDecoder().decode(zip.subarray(p + 46, p + 46 + nl));
+    if (name.toLowerCase() === wanted.toLowerCase()) {
+      const start = lho + 30 + dv.getUint16(lho + 26, true) + dv.getUint16(lho + 28, true);
+      const raw = zip.subarray(start, start + csize);
+      if (method === 0) return new TextDecoder().decode(raw);
+      const out = await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).arrayBuffer();
+      return new TextDecoder().decode(out);
+    }
+    p += 46 + nl + el + cl;
+  }
+  return null;
+}
+async function extName(bytes) {
+  try {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const zip = bytes.subarray(12 + dv.getUint32(8, true));
+    const man = JSON.parse((await readZipFile(zip, "manifest.json")).replace(/^﻿/, ""));
+    let name = man.name || "";
+    const m = /^__MSG_(.+)__$/.exec(name);
+    if (m) {
+      const langs = [navigator.language.replace("-", "_"), navigator.language.split("-")[0], man.default_locale || "en"];
+      for (const l of langs) {
+        const t = await readZipFile(zip, "_locales/" + l + "/messages.json");
+        if (!t) continue;
+        const msgs = JSON.parse(t.replace(/^﻿/, ""));
+        const key = Object.keys(msgs).find((k) => k.toLowerCase() === m[1].toLowerCase());
+        if (key) { name = msgs[key].message; break; }
+      }
+    }
+    return name && !/^__MSG_/.test(name) ? name : null;
+  } catch { return null; }
+}
+
+async function remember(url, name) {
+  const { names = {} } = await chrome.storage.session.get("names");
+  names[url] = name;
+  await chrome.storage.session.set({ names });
 }
 
 // The browser installs an extension when a CRX is downloaded by an extension:
 // the file is handed over as such a download and the browser shows its own install prompt.
-async function install(buf, name) {
-  const bytes = new Uint8Array(buf);
-  if (!(bytes.length > 4 && bytes[0] === 0x43 && bytes[1] === 0x72 && bytes[2] === 0x32 && bytes[3] === 0x34)) {
-    throw new Error("это не файл расширения CRX");
-  }
+async function install(bytes, name) {
   const url = URL.createObjectURL(new Blob([bytes], { type: CRX }));
-  const id = await chrome.downloads.download({ url, filename: crxName(name), conflictAction: "uniquify" });
+  await remember(url, safeName(name) + ".crx");
+  const id = await chrome.downloads.download({ url, conflictAction: "uniquify" });
   status.textContent = "Подтвердите установку в окне браузера.";
-  const accept = (danger) => {
-    if (danger && danger !== "safe" && danger !== "accepted") chrome.downloads.acceptDanger(id).catch(() => {});
-  };
   chrome.downloads.onChanged.addListener(function onChanged(d) {
     if (d.id !== id) return;
-    if (d.danger) accept(d.danger.current);
+    if (d.danger && d.danger.current && d.danger.current !== "safe" && d.danger.current !== "accepted") {
+      chrome.downloads.acceptDanger(id).catch(() => {});
+    }
     if (d.state && d.state.current !== "in_progress") {
       chrome.downloads.onChanged.removeListener(onChanged);
       setTimeout(() => URL.revokeObjectURL(url), 60000);
       if (d.state.current === "interrupted") status.textContent = "Установка прервана.";
+      else closeTab(1500);
     }
   });
-  const [item] = await chrome.downloads.search({ id });
-  if (item) accept(item.danger);
 }
 
 function fail(e) {
   status.textContent = "Не получилось: " + (e && e.message ? e.message : e);
-  pick.hidden = false;
+  pick.hidden = false; choice.hidden = true;
 }
 
+// a chosen file: straight to installing
 pick.addEventListener("click", () => file.click());
-file.addEventListener("change", () => {
+file.addEventListener("change", async () => {
   const f = file.files && file.files[0];
   if (!f) return;
   pick.hidden = true;
-  status.textContent = "Открываю " + f.name + "…";
-  f.arrayBuffer().then((b) => install(b, f.name)).catch(fail);
+  try {
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    if (!isCrx(bytes)) throw new Error("это не файл расширения CRX");
+    const name = (await extName(bytes)) || f.name.replace(/\.crx$/i, "");
+    title.textContent = name;
+    await install(bytes, name);
+  } catch (e) { fail(e); }
 });
 
+// a file from a site: Save / Cancel / Install
 const m = /^#u=(.+)$/.exec(location.hash);
 if (m) {
   const src = decodeURIComponent(m[1]);
+  const base = decodeURIComponent((src.split(/[?#]/)[0].split("/").pop() || "extension").replace(/\.crx$/i, ""));
   pick.hidden = true;
-  status.textContent = "Скачиваю расширение…";
+  title.textContent = base;
+  status.textContent = "Загружаю сведения о расширении…";
+  let bytes = null, name = base;
   fetch(src, { credentials: "include" })
     .then((r) => { if (!r.ok) throw new Error("ошибка загрузки " + r.status); return r.arrayBuffer(); })
-    .then((b) => install(b, src))
+    .then(async (b) => {
+      bytes = new Uint8Array(b);
+      if (!isCrx(bytes)) throw new Error("это не файл расширения CRX");
+      name = (await extName(bytes)) || base;
+      title.textContent = name;
+      status.textContent = "Расширение для браузера. Установить его или сохранить файл?";
+      choice.hidden = false;
+    })
     .catch(fail);
+  $("cancel").addEventListener("click", () => closeTab());
+  $("install").addEventListener("click", () => { choice.hidden = true; install(bytes, name).catch(fail); });
+  $("save").addEventListener("click", async () => {
+    choice.hidden = true;
+    const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+    await remember(url, safeName(name) + ".crx");
+    await chrome.downloads.download({ url, conflictAction: "uniquify" });
+    status.textContent = "Файл сохранён в загрузки.";
+    closeTab(1500);
+  });
 }
 EXEOF
 python3 - <<'PKEOF'
