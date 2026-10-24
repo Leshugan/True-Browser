@@ -1266,7 +1266,7 @@ cat > ext/manifest.json <<'EXEOF'
 {
   "manifest_version": 3,
   "name": "True Browser",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Встроенный помощник True Browser: установка расширений из файлов CRX и сразу при их скачивании.",
   "permissions": ["downloads"],
   "host_permissions": ["<all_urls>"],
@@ -1333,7 +1333,8 @@ const file = document.getElementById("file");
 
 function crxName(name) {
   const base = (name || "").split(/[\/?#]/).filter(Boolean).pop() || "extension";
-  return base.replace(/\.crx$/i, "").replace(/[^\w.-]+/g, "_").slice(0, 80) + ".crx";
+  // a fresh name every time, so the browser never asks to download an existing file again
+  return base.replace(/\.crx$/i, "").replace(/[^\w.-]+/g, "_").slice(0, 60) + "-" + Date.now().toString(36) + ".crx";
 }
 
 // The browser installs an extension when a CRX is downloaded by an extension:
