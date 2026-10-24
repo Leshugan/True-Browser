@@ -1256,6 +1256,21 @@ IFACE=$(grep -oE 'invoke-interface \{[^}]*\}, L[a-z0-9]+;->k\(\)Z' "$TPH" | head
     awk '/^\.method .* [a-z]\(\)Z$/{f=1} f{print} f&&/^\.end method/{f=0}' "$f" | grep -v '^\s*\.line\|^\s*$' | head -120
   done
 } > ntp_iface.txt 2>&1 || true
+{ # data for Google sign-in and sync (read by Claude)
+  echo "=== SIGNIN: classes"
+  ls -d code/smali*/org/chromium/components/signin code/smali*/org/chromium/chrome/browser/signin code/smali*/org/chromium/chrome/browser/sync 2>/dev/null
+  find code/smali*/org/chromium -path '*signin*' -name '*.smali' -o -path '*sync*' -name '*.smali' 2>/dev/null | sed 's#code/smali[^/]*/##' | sort | head -150
+  echo "=== SIGNIN: account manager delegates (who talks to Android accounts / Google Play services)"
+  grep -rlE 'Landroid/accounts/AccountManager;|GoogleAuthUtil|com\.google\.android\.gms\.auth' code/smali* | head -30
+  for f in $(grep -rlE 'Landroid/accounts/AccountManager;->getAccountsByType|GoogleAuthUtil' code/smali* | head -4); do
+    echo "################ $f ($(wc -l < "$f") lines)"
+    grep -v '^\s*\.line\|^\s*$' "$f" | grep -E '^\.class|^\.super|^\.implements|^\.method|AccountManager|GoogleAuth|const-string|invoke' | head -120
+  done
+  echo "=== SIGNIN: interfaces with account methods"
+  grep -rlE 'getAuthToken|getAccountsByType' code/smali* | head -20
+  echo "=== SIGNIN: feature / switch strings"
+  grep -rhoE 'const-string(/jumbo)? [vp][0-9]+, "[^"]*([Ss]ign[Ii]n|[Ss]ync|Gaia|GAIA|Identity)[^"]*"' code/smali* | sed 's/.*, //' | sort -u | head -150
+} >> ntp_iface.txt 2>&1 || true
 { # data for skipping the download dialog for extension files (read by Claude)
   for f in $(ls code/smali*/org/chromium/chrome/browser/download/DownloadDialogBridge.smali \
                 code/smali*/org/chromium/chrome/browser/download/dialogs/*.smali 2>/dev/null | head -12); do
@@ -1508,5 +1523,14 @@ grep -n -A45 'True Browser: hide' "$F" | grep -v '\.line' >> $R
 tail -20 codebuild.log >> $R
 cat closeall.txt >> $R
 cat ntp_iface.txt >> $R
+{ echo "=== SIGNIN: native library strings (keys, sync endpoints)"
+  L=$(unzip -Z1 app.apk | grep -E '^lib/arm64-v8a/libchrome[^/]*\.so$' | head -1)
+  echo "lib: $L"
+  unzip -p app.apk "$L" | strings -n 8 > libstr.txt
+  grep -oE 'AIza[0-9A-Za-z_-]{35}' libstr.txt | sort | uniq -c | head
+  grep -oE '[0-9]{6,}-?[0-9a-z]*\.apps\.googleusercontent\.com' libstr.txt | sort | uniq -c | head
+  grep -E 'chrome-sync|clients4\.google\.com|accounts\.google\.com/(o/oauth2|signin|ServiceLogin)|oauth2\.googleapis|google_api_key|GOOGLE_API_KEY|api_key' libstr.txt | sort -u | head -40
+  grep -E '^(sync|signin|Sync|Signin)[A-Za-z]{3,40}$' libstr.txt | sort -u | head -80
+} >> $R 2>&1 || true
 wc -c $R
 echo "::endgroup::"
