@@ -1216,6 +1216,15 @@ IFACE=$(grep -oE 'invoke-interface \{[^}]*\}, L[a-z0-9]+;->k\(\)Z' "$TPH" | head
     awk '/^\.method .* [a-z]\(\)Z$/{f=1} f{print} f&&/^\.end method/{f=0}' "$f" | grep -v '^\s*\.line\|^\s*$' | head -120
   done
 } > ntp_iface.txt 2>&1 || true
+{ # data for skipping the download dialog for extension files (read by Claude)
+  for f in $(ls code/smali*/org/chromium/chrome/browser/download/DownloadDialogBridge.smali \
+                code/smali*/org/chromium/chrome/browser/download/dialogs/*.smali 2>/dev/null | head -12); do
+    echo "################ $f ($(wc -l < "$f") lines)"
+    grep -v '^\s*\.line\|^\s*$' "$f" | head -400
+  done
+  echo "=== callers of DownloadDialogBridge"
+  grep -rln 'Lorg/chromium/chrome/browser/download/DownloadDialogBridge;' code/smali* | head -10
+} >> ntp_iface.txt 2>&1 || true
 python3 - "$IFACE" code <<'IFEOF'
 import os, sys
 iface, root = sys.argv[1], sys.argv[2]
