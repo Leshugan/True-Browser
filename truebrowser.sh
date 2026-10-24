@@ -1206,6 +1206,46 @@ open("ntp_dirs.txt", "w").write(" ".join("code/" + x for x in sorted(dirs)))
 assert n > 0, "home page logo flags not found"
 NTEOF
 KEEP="$KEEP $(cat ntp_dirs.txt)"
+# extension files (.crx): no "where to save" dialog - the download goes straight on, so the browser's
+# own "add extension" prompt comes up at once (same as pressing Cancel in that dialog)
+DDB=$(ls code/smali*/org/chromium/chrome/browser/download/DownloadDialogBridge.smali | head -1)
+python3 - "$DDB" <<'DDEOF'
+import re, sys
+f = sys.argv[1]; s = open(f).read()
+m = s.index(".method public final showDialog(Lorg/chromium/ui/base/WindowAndroid;JIILjava/lang/String;Lorg/chromium/chrome/browser/profiles/Profile;)V")
+e = s.index(".end method", m); body = s[m:e]
+c = re.search(r"const/16 (\w+), (0x[0-9a-f]+)\s+invoke-static \{\1, (\w+), (\w+)\}, (LJ/N;->\w+\(IJ\)V)", body)
+w = re.search(r"invoke-static \{p1\}, (L\w+;->\w+\(Lorg/chromium/ui/base/WindowAndroid;\)V)", body)
+assert c and w, "download dialog cancel path not found"
+cls = "Lorg/chromium/chrome/browser/download/DownloadDialogBridge;"
+inj = f"""    # True Browser: .crx -> no dialog
+    if-eqz p6, :tb_dialog
+    invoke-virtual {{p6}}, Ljava/lang/String;->toLowerCase()Ljava/lang/String;
+    move-result-object v0
+    const-string/jumbo v1, ".crx"
+    invoke-virtual {{v0, v1}}, Ljava/lang/String;->endsWith(Ljava/lang/String;)Z
+    move-result v0
+    if-eqz v0, :tb_dialog
+    iput-object p1, p0, {cls}->c:Lorg/chromium/ui/base/WindowAndroid;
+    iget-wide v0, p0, {cls}->a:J
+    const-wide/16 v2, 0x0
+    cmp-long v2, v0, v2
+    if-eqz v2, :tb_no_native
+    const/16 v2, {c.group(2)}
+    invoke-static {{v2, v0, v1}}, {c.group(5)}
+    :tb_no_native
+    invoke-static {{p1}}, {w.group(1)}
+    invoke-virtual {{p0}}, {cls}->b()V
+    return-void
+    :tb_dialog
+"""
+li = s.index(".locals", m); le = s.index("\n", li) + 1
+n = int(s[li:le].split()[1])
+s = s[:li] + ".locals %d\n" % max(n, 4) + inj + s[le:]
+open(f, "w").write(s)
+print("download dialog: skipped for .crx via", c.group(5), c.group(2))
+DDEOF
+KEEP="$KEEP $(dirname "$(dirname "$(dirname "$(dirname "$(dirname "$(dirname "$DDB")")")")")")"
 # the toolbar asks the home page "is the address bar shown inside the page?" (method k() of the
 # home-page interface used by ToolbarPhone) -> always "no", so the toolbar shows its own address bar
 TPH=$(ls code/smali*/org/chromium/chrome/browser/toolbar/top/ToolbarPhone.smali | head -1)
@@ -1275,7 +1315,7 @@ cat > ext/manifest.json <<'EXEOF'
 {
   "manifest_version": 3,
   "name": "True Browser",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Встроенный помощник True Browser: установка расширений из файлов CRX и сразу при их скачивании.",
   "permissions": ["downloads"],
   "host_permissions": ["<all_urls>"],
@@ -1284,20 +1324,34 @@ cat > ext/manifest.json <<'EXEOF'
 EXEOF
 cat > ext/bg.js <<'EXEOF'
 "use strict";
-// A .crx that a site hands out as an ordinary file: stop that download and offer to install it.
+// A .crx that a site hands out as an ordinary file: stop that download and install it instead.
 const CRX = "application/x-chrome-extension";
-function crxUrl(u) {
-  try { return /\.crx$/i.test(new URL(u).pathname); } catch { return false; }
+const handled = new Set();
+function isCrx(item) {
+  const name = (item.filename || "").toLowerCase();
+  let path = "";
+  try { path = new URL(item.finalUrl || item.url).pathname.toLowerCase(); } catch {}
+  return name.endsWith(".crx") || path.endsWith(".crx");
 }
-chrome.downloads.onCreated.addListener(async (item) => {
-  if (item.byExtensionId === chrome.runtime.id) return;
-  if (item.mime === CRX) return; // the browser installs these itself
+async function take(item) {
+  if (handled.has(item.id) || item.byExtensionId === chrome.runtime.id) return;
+  if (item.mime === CRX || !isCrx(item)) return;
   const url = item.finalUrl || item.url;
   if (!/^https?:/i.test(url)) return;
-  if (!crxUrl(url) && !/\.crx$/i.test(item.filename || "")) return;
+  handled.add(item.id);
   try { await chrome.downloads.cancel(item.id); } catch {}
   try { await chrome.downloads.erase({ id: item.id }); } catch {}
   chrome.tabs.create({ url: chrome.runtime.getURL("install.html") + "#u=" + encodeURIComponent(url), active: true });
+}
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => { suggest(); take(item); });
+chrome.downloads.onCreated.addListener((item) => { take(item); });
+// our own hand-over downloads: the browser deletes the file after installing; drop the list entry too
+chrome.downloads.onChanged.addListener(async (d) => {
+  if (!d.state || d.state.current === "in_progress") return;
+  const [item] = await chrome.downloads.search({ id: d.id });
+  if (item && item.byExtensionId === chrome.runtime.id) {
+    setTimeout(() => chrome.downloads.erase({ id: d.id }).catch(() => {}), 60000);
+  }
 });
 EXEOF
 cat > ext/install.html <<'EXEOF'
