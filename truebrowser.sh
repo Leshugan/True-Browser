@@ -1256,6 +1256,15 @@ IFACE=$(grep -oE 'invoke-interface \{[^}]*\}, L[a-z0-9]+;->k\(\)Z' "$TPH" | head
     awk '/^\.method .* [a-z]\(\)Z$/{f=1} f{print} f&&/^\.end method/{f=0}' "$f" | grep -v '^\s*\.line\|^\s*$' | head -120
   done
 } > ntp_iface.txt 2>&1 || true
+{ # data for the "Sign in" entry in settings (read by Claude)
+  echo "=== SETTINGS: main settings screen and the sign-in entry"
+  for f in $(ls code/smali*/org/chromium/chrome/browser/sync/settings/SignInPreference.smali \
+                code/smali*/org/chromium/chrome/browser/settings/MainSettings.smali 2>/dev/null); do
+    echo "################ $f ($(wc -l < "$f") lines)"
+    grep -v '^\s*\.line\|^\s*$' "$f" | head -500
+  done
+  grep -rln 'SignInPreference' code/smali* | head -10
+} >> ntp_iface.txt 2>&1 || true
 { # data for the "dangerous file" download dialog (read by Claude)
   for f in $(ls code/smali*/org/chromium/chrome/browser/download/*Danger*.smali 2>/dev/null | head -6); do
     echo "################ $f ($(wc -l < "$f") lines)"
@@ -1510,6 +1519,26 @@ set +eo pipefail
 R=report.txt
 echo "$TAG" > $R; cat patch.log xmltree.log >> $R
 echo "=== code: $KEEP" >> $R
+python3 - >> $R 2>&1 <<'SXEOF'
+import sys, zipfile
+sys.path.insert(0, "tb")
+from axml import AXML
+z = zipfile.ZipFile("app.apk")
+print("=== SETTINGS: preference XML with the sign-in entry")
+for n in z.namelist():
+    if not (n.startswith("res/") and n.endswith(".xml")): continue
+    d = z.read(n)
+    if d[:2] != b"\x03\x00" or b"S\x00i\x00g\x00n\x00I\x00n\x00P" not in d and b"SignInPreference" not in d: continue
+    try: x = AXML(d)
+    except Exception: continue
+    print("#####", n)
+    for nd, par in x.elements():
+        attrs = []
+        for a in nd.attrs:
+            v = x.s(a.raw) if a.raw != 0xFFFFFFFF else hex(a.data)
+            attrs.append("%s=%s" % (x.s(a.name), v))
+        print("  ", x.tag(nd), " ".join(attrs)[:300])
+SXEOF
 grep -n -A45 'True Browser: hide' "$F" | grep -v '\.line' >> $R
 tail -20 codebuild.log >> $R
 cat closeall.txt >> $R
