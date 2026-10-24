@@ -443,6 +443,9 @@ STATUS_FROM = os.environ.get("TB_STATUS_TAG", "")
 EXT_IDS = {int(m.group(2), 16): m.group(1) for m in re.finditer(
     r'type="id" name="(extensions_menu_button)" id="(0x[0-9a-f]+)"', pub)}
 print("extensions button ids:", sorted(EXT_IDS.values()))
+# tab switcher: the thin line that marked the bottom of the (formerly top) toolbar
+HUB_LINE_IDS = {int(m.group(2), 16): m.group(1) for m in re.finditer(
+    r'type="id" name="([^"]*(?:hairline|shadow)[^"]*)" id="(0x[0-9a-f]+)"', pub)}
 
 
 
@@ -456,6 +459,7 @@ def patch_layouts(zin):
     found = {"recycler": 0, "card": 0, "hub": 0}
     ntp = {"bottom": 0, "tiles": 0}
     found_ext = []
+    hub_lines = []
     if "--no-toolbar" not in OPTS:
         found["toolbar"] = 0
     for info in zin.infolist():
@@ -550,6 +554,12 @@ def patch_layouts(zin):
                 # address bar icon: drawn round when it shows a site / search engine picture
                 x.retag(nd, "tb.RoundIcon")
                 print("status icon made round in %s" % n); mod = True
+        if any(x.tag(nd) and ("hub." in x.tag(nd) or el_id(x, nd) in (ID_HPHC, ID_HMC)) for nd, _ in els):
+            for nd, _ in els:
+                if el_id(x, nd) in HUB_LINE_IDS:
+                    x.set(nd, "visibility", T_INT_DEC, 2)
+                    x.set(nd, "layout_height", T_DIMENSION, 0)
+                    hub_lines.append("%s in %s" % (HUB_LINE_IDS[el_id(x, nd)], n)); mod = True
         tiles_row = next((nd for nd, _ in els if (x.tag(nd) or "").endswith("MostVisitedTilesLayout")), None)
         if tiles_row is not None:
             # home page speed dial right to left: the row fills the width and lays tiles out from the right
@@ -565,6 +575,7 @@ def patch_layouts(zin):
             print("patched %s (%s)" % (n, tag))
     print("found:", found, "home page:", ntp)
     print("extensions button hidden:", found_ext)
+    print("tab switcher lines hidden:", hub_lines)
     if not all(found.values()):
         die("not all layouts found")
     return changed
@@ -1382,19 +1393,12 @@ IFACE=$(grep -oE 'invoke-interface \{[^}]*\}, L[a-z0-9]+;->k\(\)Z' "$TPH" | head
     awk '/^\.method .* [a-z]\(\)Z$/{f=1} f{print} f&&/^\.end method/{f=0}' "$f" | grep -v '^\s*\.line\|^\s*$' | head -120
   done
 } > ntp_iface.txt 2>&1 || true
-{ # data for the "Sign in" entry in settings (read by Claude)
-  echo "=== SETTINGS: main settings screen and the sign-in entry"
-  for f in $(ls code/smali*/org/chromium/chrome/browser/sync/settings/SignInPreference.smali \
-                code/smali*/org/chromium/chrome/browser/settings/MainSettings.smali 2>/dev/null); do
+{ # data for the "dangerous file" download dialog answer (read by Claude)
+  B=$(ls code/smali*/org/chromium/chrome/browser/download/DangerousDownloadDialogBridge.smali | head -1)
+  for c in $(grep -oE 'new-instance \w+, L\w+;' "$B" | grep -oE 'L\w+;' | sort -u | tr -d 'L;'); do
+    f=$(ls code/smali*/$c.smali 2>/dev/null | head -1); [ -n "$f" ] || continue
     echo "################ $f ($(wc -l < "$f") lines)"
-    grep -v '^\s*\.line\|^\s*$' "$f" | head -500
-  done
-  grep -rln 'SignInPreference' code/smali* | head -10
-} >> ntp_iface.txt 2>&1 || true
-{ # data for the "dangerous file" download dialog (read by Claude)
-  for f in $(ls code/smali*/org/chromium/chrome/browser/download/*Danger*.smali 2>/dev/null | head -6); do
-    echo "################ $f ($(wc -l < "$f") lines)"
-    grep -v '^\s*\.line\|^\s*$' "$f" | head -300
+    grep -v '^\s*\.line\|^\s*$' "$f" | head -250
   done
 } >> ntp_iface.txt 2>&1 || true
 { # data for skipping the download dialog for extension files (read by Claude)
@@ -1735,26 +1739,7 @@ set +eo pipefail
 R=report.txt
 echo "$TAG" > $R; cat patch.log xmltree.log >> $R
 echo "=== code: $KEEP" >> $R
-python3 - >> $R 2>&1 <<'SXEOF'
-import sys, zipfile
-sys.path.insert(0, "tb")
-from axml import AXML
-z = zipfile.ZipFile("app.apk")
-print("=== SETTINGS: preference XML with the sign-in entry")
-for n in z.namelist():
-    if not (n.startswith("res/") and n.endswith(".xml")): continue
-    d = z.read(n)
-    if d[:2] != b"\x03\x00" or b"S\x00i\x00g\x00n\x00I\x00n\x00P" not in d and b"SignInPreference" not in d: continue
-    try: x = AXML(d)
-    except Exception: continue
-    print("#####", n)
-    for nd, par in x.elements():
-        attrs = []
-        for a in nd.attrs:
-            v = x.s(a.raw) if a.raw != 0xFFFFFFFF else hex(a.data)
-            attrs.append("%s=%s" % (x.s(a.name), v))
-        print("  ", x.tag(nd), " ".join(attrs)[:300])
-SXEOF
+
 grep -n -A45 'True Browser: hide' "$F" | grep -v '\.line' >> $R
 tail -20 codebuild.log >> $R
 cat closeall.txt >> $R
