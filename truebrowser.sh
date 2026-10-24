@@ -1213,7 +1213,7 @@ python3 - "$DDB" <<'DDEOF'
 import re, sys
 f = sys.argv[1]; s = open(f).read()
 m = s.index(".method public final showDialog(Lorg/chromium/ui/base/WindowAndroid;JIILjava/lang/String;Lorg/chromium/chrome/browser/profiles/Profile;)V")
-e = s.index(".end method", m); body = s[m:e]
+e = s.index(".end method", m); body = re.sub(r"(?m)^\s*\.line .*$", "", s[m:e])
 c = re.search(r"const/16 (\w+), (0x[0-9a-f]+)\s+invoke-static \{\1, (\w+), (\w+)\}, (LJ/N;->\w+\(IJ\)V)", body)
 w = re.search(r"invoke-static \{p1\}, (L\w+;->\w+\(Lorg/chromium/ui/base/WindowAndroid;\)V)", body)
 assert c and w, "download dialog cancel path not found"
