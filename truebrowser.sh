@@ -1276,7 +1276,19 @@ ctxf = re.search(r"Landroidx/preference/Preference;->(\w+):Landroid/content/Cont
 assert ctxf, "preference context field not found"
 im = re.search(r"\.method public abstract (\w+)\(Landroidx/preference/Preference;\)Z", open(ifile).read())
 assert im, "click listener method not found"
-inj = "    new-instance %s, Ltb/SignIn;\n    invoke-direct {%s}, Ltb/SignIn;-><init>()V\n    iput-object %s, p0, Landroidx/preference/Preference;->%s:%s\n" % (last.group(1), last.group(1), last.group(1), field, iface)
+r = last.group(1)
+# made by name (no new method in the full main code file)
+inj = ("    :tb_si_try\n"
+       "    const-string/jumbo %s, \"tb.SignIn\"\n"
+       "    invoke-static {%s}, Ljava/lang/Class;->forName(Ljava/lang/String;)Ljava/lang/Class;\n"
+       "    move-result-object %s\n"
+       "    invoke-virtual {%s}, Ljava/lang/Class;->newInstance()Ljava/lang/Object;\n"
+       "    move-result-object %s\n"
+       "    check-cast %s, %s\n"
+       "    iput-object %s, p0, Landroidx/preference/Preference;->%s:%s\n"
+       "    :tb_si_end\n"
+       "    .catch Ljava/lang/Throwable; {:tb_si_try .. :tb_si_end} :tb_si_fail\n"
+       "    :tb_si_fail\n") % (r, r, r, r, r, r, iface, r, field, iface)
 pos = m + last.end()
 s = s[:pos] + "\n    # True Browser: Sign in -> Google sign-in page in a tab\n" + inj + s[pos:]
 open(f, "w").write(s)
