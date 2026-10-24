@@ -487,6 +487,11 @@ def patch_layouts(zin):
             x.set(root, "rotation", T_FLOAT, ROT180)
             x.set(root, "layoutDirection", T_INT_DEC, LTR)
             found["card"] += 1; mod = True
+        elif re.search(r"\.tab_management\.\w*(Message|Card)\w*View$", tag) or re.search(r"\.tab_ui\.\w*(Message|Card)\w*View$", tag):
+            # other cards in the (upside-down) tab grid: notices like "inactive tabs" - turned back too
+            x.set(root, "rotation", T_FLOAT, ROT180)
+            x.set(root, "layoutDirection", T_INT_DEC, LTR)
+            print("tab grid card turned upright: %s (%s)" % (n, tag)); mod = True
         elif any(el_id(x, nd) == ID_HPHC for nd, _ in els):
             c = i = 0
             for nd, parent in els:
