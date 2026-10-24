@@ -1259,6 +1259,67 @@ s = s[:m] + body + s[e:]
 open(f, "w").write(s)
 print("settings: Sign in entry always shown")
 SIEOF
+# "Sign in" opens the Google sign-in page in a new browser tab (web sign-in, like on a PC)
+python3 - "$SIP" "$CD" <<'SWEOF'
+import os, re, sys
+f, cd = sys.argv[1], sys.argv[2]; s = open(f).read()
+m = s.index(".method public final m0()V"); e = s.index(".end method", m); body = s[m:e]
+sets = list(re.finditer(r"iput-object (\w+), p0, Landroidx/preference/Preference;->(\w+):(L\w+;)", body))
+assert sets, "sign-in click handler not found"
+last = sets[-1]; field, iface = last.group(2), last.group(3)
+for root, _, fs in os.walk("code"):
+    for x in fs:
+        if x == iface[1:-1].split("/")[-1] + ".smali" and root.count(os.sep) == 1:
+            ifile = os.path.join(root, x)
+assert ifile, "click listener interface not found: " + iface
+ctxf = re.search(r"Landroidx/preference/Preference;->(\w+):Landroid/content/Context;", body)
+assert ctxf, "preference context field not found"
+im = re.search(r"\.method public abstract (\w+)\(Landroidx/preference/Preference;\)Z", open(ifile).read())
+assert im, "click listener method not found"
+inj = "    new-instance %s, Ltb/SignIn;\n    invoke-direct {%s}, Ltb/SignIn;-><init>()V\n    iput-object %s, p0, Landroidx/preference/Preference;->%s:%s\n" % (last.group(1), last.group(1), last.group(1), field, iface)
+pos = m + last.end()
+s = s[:pos] + "\n    # True Browser: Sign in -> Google sign-in page in a tab\n" + inj + s[pos:]
+open(f, "w").write(s)
+os.makedirs(os.path.join(cd, "tb"), exist_ok=True)
+open(os.path.join(cd, "tb", "SignIn.smali"), "w").write(""".class public Ltb/SignIn;
+.super Ljava/lang/Object;
+.implements %s
+
+.method public constructor <init>()V
+    .locals 0
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method
+
+.method public %s(Landroidx/preference/Preference;)Z
+    .locals 4
+    :try_start
+    iget-object v0, p1, Landroidx/preference/Preference;->%s:Landroid/content/Context;
+    new-instance v1, Landroid/content/Intent;
+    const-string v2, "android.intent.action.VIEW"
+    const-string v3, "https://accounts.google.com/ServiceLogin?continue=https%%3A%%2F%%2Fmyaccount.google.com%%2F"
+    invoke-static {v3}, Landroid/net/Uri;->parse(Ljava/lang/String;)Landroid/net/Uri;
+    move-result-object v3
+    invoke-direct {v1, v2, v3}, Landroid/content/Intent;-><init>(Ljava/lang/String;Landroid/net/Uri;)V
+    invoke-virtual {v0}, Landroid/content/Context;->getPackageName()Ljava/lang/String;
+    move-result-object v2
+    invoke-virtual {v1, v2}, Landroid/content/Intent;->setPackage(Ljava/lang/String;)Landroid/content/Intent;
+    const-string v2, "com.android.browser.application_id"
+    invoke-virtual {v0}, Landroid/content/Context;->getPackageName()Ljava/lang/String;
+    move-result-object v3
+    invoke-virtual {v1, v2, v3}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;
+    const v2, 0x10000000
+    invoke-virtual {v1, v2}, Landroid/content/Intent;->addFlags(I)Landroid/content/Intent;
+    invoke-virtual {v0, v1}, Landroid/content/Context;->startActivity(Landroid/content/Intent;)V
+    :try_end
+    .catch Ljava/lang/Throwable; {:try_start .. :try_end} :done
+    :done
+    const/4 v0, 0x1
+    return v0
+.end method
+""" % (iface, im.group(1), ctxf.group(1)))
+print("settings: Sign in opens the Google sign-in page; listener", iface, im.group(1))
+SWEOF
 # extension files (.crx): no "where to save" dialog - the download goes straight on, so the browser's
 # own "add extension" prompt comes up at once (same as pressing Cancel in that dialog)
 DDB=$(ls code/smali*/org/chromium/chrome/browser/download/DownloadDialogBridge.smali | head -1)
@@ -1383,7 +1444,7 @@ cat > ext/manifest.json <<'EXEOF'
 {
   "manifest_version": 3,
   "name": "True Browser",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Встроенный помощник True Browser: установка расширений из файлов CRX и сразу при их скачивании.",
   "permissions": ["downloads", "storage"],
   "host_permissions": ["<all_urls>"],
@@ -1415,7 +1476,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   if (item.byExtensionId === chrome.runtime.id) {
     // our own downloads get the extension's real name instead of a random one
     chrome.storage.session.get("names").then(({ names = {} }) => {
-      const name = names[item.url];
+      const name = item.mime === CRX ? null : names[item.url];
       if (name) suggest({ filename: name, conflictAction: "uniquify" }); else suggest();
     }).catch(() => suggest());
     return true;
@@ -1541,7 +1602,6 @@ async function remember(url, name) {
 // the file is handed over as such a download and the browser shows its own install prompt.
 async function install(bytes, name) {
   const url = URL.createObjectURL(new Blob([bytes], { type: CRX }));
-  await remember(url, safeName(name) + ".crx");
   const id = await chrome.downloads.download({ url, conflictAction: "uniquify" });
   status.textContent = "Подтвердите установку в окне браузера.";
   chrome.downloads.onChanged.addListener(function onChanged(d) {
